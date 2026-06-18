@@ -18,6 +18,11 @@ from src.trend_analysis import (
     create_benchmark_chart, get_all_anomalies, calculate_overall_daily_oee
 )
 from src.report_export import generate_pdf_report
+from src.health_score import (
+    calculate_all_health_scores, calculate_health_score_trend,
+    calculate_health_score_for_device,
+    get_health_level, detect_health_score_drop_anomalies
+)
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.title = 'OEE设备综合效率分析系统'
@@ -140,6 +145,14 @@ def get_overview_layout():
             dbc.Col(get_kpi_card("质量率", "--", "目标: 99.9%", "info", "✅"), width=3),
         ], className="mb-4", id="kpi-cards"),
         
+        dbc.Card([
+            dbc.CardHeader([
+                html.H5("💚 设备健康概览", className="mb-0"),
+                html.Small(" 基于最近7天数据计算，点击卡片跳转到停机归因分析", className="text-muted ms-2"),
+            ]),
+            dbc.CardBody(id='health-score-cards'),
+        ], className="shadow-sm mb-4"),
+        
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -226,6 +239,13 @@ def get_data_import_layout():
                     dbc.CardBody([
                         html.Div(id='validation-results'),
                     ]),
+                ], className="shadow-sm mb-4"),
+                
+                dbc.Card([
+                    dbc.CardHeader("💚 健康评分预览"),
+                    dbc.CardBody([
+                        html.Div(id='health-score-preview'),
+                    ]),
                 ], className="shadow-sm"),
                 
             ], width=12),
@@ -251,68 +271,12 @@ def get_trend_analysis_layout():
         
         get_date_range_picker(),
         
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("趋势类型"),
-                    dbc.CardBody([
-                        dbc.RadioItems(
-                            id='trend-type',
-                            options=[
-                                {'label': '日趋势', 'value': '日'},
-                                {'label': '周趋势', 'value': '周'},
-                                {'label': '月趋势', 'value': '月'},
-                            ],
-                            value='日',
-                            inline=True,
-                        ),
-                    ]),
-                ], className="shadow-sm"),
-            ], width=4),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("显示设置"),
-                    dbc.CardBody([
-                        dbc.Checklist(
-                            id='trend-options',
-                            options=[
-                                {'label': '显示7日移动平均线', 'value': 'moving_avg'},
-                                {'label': '显示三因子趋势', 'value': 'show_factors'},
-                            ],
-                            value=['moving_avg'],
-                            inline=True,
-                        ),
-                    ]),
-                ], className="shadow-sm"),
-            ], width=8),
-        ], className="mb-4"),
+        dbc.Tabs([
+            dbc.Tab(label="OEE趋势", tab_id="oee-trend"),
+            dbc.Tab(label="健康分趋势", tab_id="health-trend"),
+        ], id="trend-tabs", active_tab="oee-trend", className="mb-4"),
         
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("OEE趋势图"),
-                    dbc.CardBody([
-                        dcc.Graph(id='trend-chart'),
-                    ]),
-                ], className="shadow-sm"),
-            ], width=12),
-        ], className="mb-4"),
-        
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("单设备三因子趋势"),
-                    dbc.CardBody([
-                        dcc.Dropdown(
-                            id='factor-trend-device',
-                            placeholder="选择设备查看三因子趋势",
-                            className="mb-3",
-                        ),
-                        dcc.Graph(id='factor-trend-chart'),
-                    ]),
-                ], className="shadow-sm"),
-            ], width=12),
-        ], className="mb-4"),
+        html.Div(id='trend-tab-content'),
         
     ], fluid=True)
 
@@ -509,29 +473,49 @@ app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     dcc.Store(id='data-loaded-store', data=False),
     dcc.Store(id='drilldown-state', data={}),
+    dcc.Store(id='previous-health-scores', data={}),
+    dcc.Store(id='current-health-scores', data={}),
+    dcc.Store(id='url-device-param', data=None),
     get_navbar(),
     html.Div(id='page-content', style={"paddingTop": "70px"}),
     get_footer(),
 ])
 
 
-@app.callback(Output('page-content', 'children'),
-              [Input('url', 'pathname')])
-def display_page(pathname):
+@app.callback(
+    [Output('page-content', 'children'),
+     Output('url-device-param', 'data')],
+    [Input('url', 'href')]
+)
+def display_page(href):
+    import urllib.parse
+    
+    pathname = '/'
+    device_param = None
+    
+    if href:
+        parsed = urllib.parse.urlparse(href)
+        pathname = parsed.path
+        
+        if parsed.query:
+            params = urllib.parse.parse_qs(parsed.query)
+            if 'device' in params:
+                device_param = params['device'][0]
+    
     if pathname == '/data-import':
-        return get_data_import_layout()
+        return get_data_import_layout(), device_param
     elif pathname == '/trend-analysis':
-        return get_trend_analysis_layout()
+        return get_trend_analysis_layout(), device_param
     elif pathname == '/downtime-analysis':
-        return get_downtime_analysis_layout()
+        return get_downtime_analysis_layout(), device_param
     elif pathname == '/benchmark':
-        return get_benchmark_layout()
+        return get_benchmark_layout(), device_param
     elif pathname == '/anomaly':
-        return get_anomaly_layout()
+        return get_anomaly_layout(), device_param
     elif pathname == '/report':
-        return get_report_layout()
+        return get_report_layout(), device_param
     else:
-        return get_overview_layout()
+        return get_overview_layout(), device_param
 
 
 def parse_contents(contents, filename):
@@ -558,18 +542,23 @@ def parse_contents(contents, filename):
     [Output('upload-status', 'children'),
      Output('validation-results', 'children'),
      Output('data-preview', 'children'),
-     Output('data-loaded-store', 'data')],
+     Output('data-loaded-store', 'data'),
+     Output('health-score-preview', 'children'),
+     Output('previous-health-scores', 'data'),
+     Output('current-health-scores', 'data')],
     [Input('upload-data', 'contents'),
      Input('load-sample-btn', 'n_clicks')],
-    [State('upload-data', 'filename')]
+    [State('upload-data', 'filename'),
+     State('current-health-scores', 'data')]
 )
-def handle_file_upload(contents, n_clicks, filename):
+def handle_file_upload(contents, n_clicks, filename, prev_health_scores):
     ctx = dash.callback_context
     
     if not ctx.triggered:
         return html.Div("请上传数据文件或加载示例数据", className="text-muted"), \
                html.Div("暂无数据", className="text-muted"), \
-               html.Div("暂无数据", className="text-muted"), False
+               html.Div("暂无数据", className="text-muted"), False, \
+               html.Div("暂无数据", className="text-muted"), {}, {}
     
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
     
@@ -584,14 +573,16 @@ def handle_file_upload(contents, n_clicks, filename):
             df = validated_df
         except Exception as e:
             return dbc.Alert(f"加载示例数据失败: {str(e)}", color="danger"), \
-                   html.Div(""), html.Div(""), False
+                   html.Div(""), html.Div(""), False, \
+                   html.Div(""), {}, {}
         
         upload_status = dbc.Alert("✅ 示例数据加载成功！", color="success")
     elif trigger_id == 'upload-data' and contents is not None:
         df, errors = parse_contents(contents, filename)
         if df is None:
             return dbc.Alert(f"❌ 文件上传失败: {errors[0] if errors else '未知错误'}", color="danger"), \
-                   html.Div(""), html.Div(""), False
+                   html.Div(""), html.Div(""), False, \
+                   html.Div(""), {}, {}
         
         if errors:
             upload_status = dbc.Alert(f"⚠️ 数据校验发现 {len(errors)} 个问题，请修正后重新上传", color="warning")
@@ -600,7 +591,8 @@ def handle_file_upload(contents, n_clicks, filename):
     else:
         return html.Div("请上传数据文件或加载示例数据", className="text-muted"), \
                html.Div("暂无数据", className="text-muted"), \
-               html.Div("暂无数据", className="text-muted"), False
+               html.Div("暂无数据", className="text-muted"), False, \
+               html.Div("暂无数据", className="text-muted"), {}, {}
     
     if df is not None and len(df) > 0:
         DATA_STORE['df'] = df
@@ -656,7 +648,73 @@ def handle_file_upload(contents, n_clicks, filename):
             dbc.Alert("✅ 所有数据校验通过，无异常", color="success", className="mt-3"),
         ])
     
-    return upload_status, error_list, preview, data_loaded
+    health_preview = html.Div("暂无数据", className="text-muted")
+    current_scores_dict = {}
+    
+    if df is not None and len(df) > 0 and not errors:
+        processed_df = process_dataframe(df)
+        max_date = str(df['日期'].max())
+        health_scores = calculate_all_health_scores(processed_df, max_date, DEFAULT_TAKT, 7)
+        
+        has_insufficient_data = any(not s['数据充足'] for s in health_scores.values())
+        
+        score_rows = []
+        for device_id, score_data in sorted(health_scores.items()):
+            score = score_data['健康分']
+            level = get_health_level(score)
+            data_note = "" if score_data['数据充足'] else " (数据不足7天)"
+            
+            score_rows.append(html.Tr([
+                html.Td(html.Strong(device_id)),
+                html.Td([
+                    html.Span(
+                        f"{score}分",
+                        style={
+                            'fontWeight': 'bold',
+                            'color': level['color'],
+                            'fontSize': '1.1rem',
+                        }
+                    ),
+                    html.Span(
+                        level['name'],
+                        style={
+                            'backgroundColor': level['bg_color'],
+                            'color': level['color'],
+                            'padding': '2px 10px',
+                            'borderRadius': '12px',
+                            'fontSize': '0.75rem',
+                            'marginLeft': '10px',
+                        }
+                    ),
+                    html.Small(data_note, className="text-muted ms-2") if data_note else None,
+                ]),
+                html.Td(f"{score_data['可用率']*100:.1f}%"),
+                html.Td(f"{score_data['性能率']*100:.1f}%"),
+                html.Td(f"{score_data['质量率']*100:.1f}%"),
+                html.Td(f"-{score_data['稳定性惩罚']:.1f}"),
+                html.Td(f"{score_data['数据天数']}天"),
+            ]))
+        
+        health_preview = html.Div([
+            html.P("基于导入数据范围内的健康评分计算：", className="text-muted mb-2"),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("设备"),
+                    html.Th("健康分"),
+                    html.Th("可用率"),
+                    html.Th("性能率"),
+                    html.Th("质量率"),
+                    html.Th("稳定性惩罚"),
+                    html.Th("数据天数"),
+                ])),
+                html.Tbody(score_rows),
+            ], className="table table-sm table-hover"),
+            html.Small("💡 数据不足7天时，评分仅供参考", className="text-muted") if has_insufficient_data else None,
+        ])
+        
+        current_scores_dict = {k: v for k, v in health_scores.items()}
+    
+    return upload_status, error_list, preview, data_loaded, health_preview, prev_health_scores, current_scores_dict
 
 
 def get_date_and_devices_from_store():
@@ -675,10 +733,17 @@ def get_date_and_devices_from_store():
      Output('device-dropdown', 'options'),
      Output('device-dropdown', 'value')],
     [Input('data-loaded-store', 'data'),
-     Input('url', 'pathname')]
+     Input('url', 'pathname'),
+     Input('url-device-param', 'data')]
 )
-def update_overview_dates(data_loaded, pathname):
-    return get_date_and_devices_from_store()
+def update_overview_dates(data_loaded, pathname, url_device):
+    min_date, max_date, device_options, devices = get_date_and_devices_from_store()
+    
+    device_value = None
+    if url_device and url_device in devices:
+        device_value = [url_device]
+    
+    return min_date, max_date, device_options, device_value
 
 
 @app.callback(
@@ -782,6 +847,117 @@ def update_overview(start_date, end_date, selected_devices):
     fig_gantt = create_gantt_chart(df, start_date, end_date, selected_devices)
     
     return kpi_cards, fig_breakdown, fig_ranking, fig_gantt
+
+
+@app.callback(
+    Output('health-score-cards', 'children'),
+    [Input('start-date-picker', 'date'),
+     Input('end-date-picker', 'date'),
+     Input('device-dropdown', 'value')]
+)
+def update_health_score_cards(start_date, end_date, selected_devices):
+    if DATA_STORE['processed_df'] is None or not end_date:
+        return html.Div("请先导入数据", className="text-muted text-center p-3")
+    
+    df = DATA_STORE['processed_df']
+    
+    health_scores = calculate_all_health_scores(df, end_date, DEFAULT_TAKT, 7)
+    
+    if selected_devices:
+        health_scores = {k: v for k, v in health_scores.items() if k in selected_devices}
+    
+    if not health_scores:
+        return html.Div("暂无设备数据", className="text-muted text-center p-3")
+    
+    cards = []
+    for device_id, score_data in sorted(health_scores.items()):
+        score = score_data['健康分']
+        level = get_health_level(score)
+        
+        card = dbc.Col(
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                        html.Div([
+                            html.H6(device_id, className="mb-1", style={"fontWeight": "bold"}),
+                            html.Div([
+                                html.Span(
+                                    level['name'],
+                                    style={
+                                        'backgroundColor': level['bg_color'],
+                                        'color': level['color'],
+                                        'padding': '2px 10px',
+                                        'borderRadius': '12px',
+                                        'fontSize': '0.75rem',
+                                        'fontWeight': 'bold',
+                                    }
+                                ),
+                            ]),
+                        ]),
+                        html.Div(
+                            f"{score}",
+                            style={
+                                'fontSize': '2.5rem',
+                                'fontWeight': 'bold',
+                                'color': level['color'],
+                                'lineHeight': '1',
+                            }
+                        ),
+                    ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
+                    html.Hr(className="my-2"),
+                    html.Div([
+                        html.Small(
+                            f"可用率: {score_data['可用率']*100:.1f}% | "
+                            f"性能率: {score_data['性能率']*100:.1f}% | "
+                            f"质量率: {score_data['质量率']*100:.1f}%"
+                        ),
+                        html.Br(),
+                        html.Small(
+                            f"稳定性惩罚: -{score_data['稳定性惩罚']:.1f}分",
+                            className="text-muted"
+                        ),
+                    ]),
+                ]),
+            ], 
+            style={'cursor': 'pointer', 'borderLeft': f'4px solid {level["color"]}'},
+            className="shadow-sm h-100 health-card",
+            id={'type': 'health-card', 'index': device_id}
+            ),
+            width=3,
+            className="mb-3",
+        )
+        cards.append(card)
+    
+    return dbc.Row(cards)
+
+
+@app.callback(
+    Output('url', 'pathname'),
+    [Input({'type': 'health-card', 'index': ALL}, 'n_clicks')],
+    [State('url', 'pathname')]
+)
+def health_card_click(n_clicks, current_path):
+    ctx = dash.callback_context
+    
+    if not ctx.triggered:
+        raise dash.exceptions.PreventUpdate
+    
+    triggered = ctx.triggered[0]['prop_id']
+    if 'health-card' not in triggered:
+        raise dash.exceptions.PreventUpdate
+    
+    try:
+        import json as _json
+        btn_id_str = triggered.split('.')[0]
+        btn_id = _json.loads(btn_id_str)
+        device_id = btn_id.get('index', '')
+    except Exception:
+        raise dash.exceptions.PreventUpdate
+    
+    if device_id:
+        return f'/downtime-analysis?device={device_id}'
+    
+    raise dash.exceptions.PreventUpdate
 
 
 @app.callback(
@@ -964,6 +1140,12 @@ def update_drilldown(start_date, end_date, selected_devices, btn_clicks, current
         device_df = df[df['设备编号'] == device_name].copy()
         device_df = device_df[(device_df['日期'] >= start_date) & (device_df['日期'] <= end_date)]
         
+        health_score_data = calculate_health_score_for_device(
+            df, device_name, end_date, DEFAULT_TAKT.get(device_name), 7
+        )
+        health_score = health_score_data['健康分']
+        health_level = get_health_level(health_score)
+        
         daily_results = []
         for date_val in sorted(device_df['日期'].unique()):
             day_result = calculate_oee_for_device(df, device_name, date_val, date_val, DEFAULT_TAKT.get(device_name))
@@ -992,8 +1174,70 @@ def update_drilldown(start_date, end_date, selected_devices, btn_clicks, current
                                    color=color, size="sm")),
             ]))
         
+        health_card = dbc.Card([
+            dbc.CardBody([
+                html.Div([
+                    html.Div([
+                        html.H6("💚 设备健康评分", className="mb-1"),
+                        html.Small("基于最近7天数据计算", className="text-muted"),
+                    ]),
+                    html.Div([
+                        html.Span(
+                            f"{health_score}",
+                            style={
+                                'fontSize': '2rem',
+                                'fontWeight': 'bold',
+                                'color': health_level['color'],
+                            }
+                        ),
+                        html.Span(
+                            health_level['name'],
+                            style={
+                                'backgroundColor': health_level['bg_color'],
+                                'color': health_level['color'],
+                                'padding': '4px 12px',
+                                'borderRadius': '15px',
+                                'fontSize': '0.875rem',
+                                'fontWeight': 'bold',
+                                'marginLeft': '12px',
+                            }
+                        ),
+                    ]),
+                ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
+                html.Hr(className="my-2"),
+                dbc.Row([
+                    dbc.Col([
+                        html.Small("可用率"),
+                        html.Div(f"{health_score_data['可用率']*100:.1f}%", 
+                                 style={'fontWeight': 'bold', 'color': '#2ecc71'}),
+                    ], width=3),
+                    dbc.Col([
+                        html.Small("性能率"),
+                        html.Div(f"{health_score_data['性能率']*100:.1f}%", 
+                                 style={'fontWeight': 'bold', 'color': '#f39c12'}),
+                    ], width=3),
+                    dbc.Col([
+                        html.Small("质量率"),
+                        html.Div(f"{health_score_data['质量率']*100:.1f}%", 
+                                 style={'fontWeight': 'bold', 'color': '#3498db'}),
+                    ], width=3),
+                    dbc.Col([
+                        html.Small("稳定性惩罚"),
+                        html.Div(f"-{health_score_data['稳定性惩罚']:.1f}分", 
+                                 style={'fontWeight': 'bold', 'color': '#e74c3c'}),
+                    ], width=3),
+                ]),
+                html.Small(
+                    f"数据天数: {health_score_data['数据天数']}天" + 
+                    ("" if health_score_data['数据充足'] else " (数据不足7天，仅供参考)"),
+                    className="text-muted mt-2 d-block"
+                ),
+            ]),
+        ], className="shadow-sm mb-3", style={'borderLeft': f'4px solid {health_level["color"]}'})
+        
         content = html.Div([
-            html.H5(f"设备: {device_name} — {factor_name}逐日明细", className="mb-2"),
+            health_card,
+            html.H5(f"设备: {device_name} — {factor_name}逐日明细", className="mb-2 mt-3"),
             html.P("按该因子值从低到高排列，点击下钻查看当日具体停机事件：", className="text-muted mb-3"),
             html.Table([
                 html.Thead(html.Tr([
@@ -1117,6 +1361,293 @@ def update_drilldown(start_date, end_date, selected_devices, btn_clicks, current
     ], className="mb-3")
     
     return html.Div([breadcrumb, content]), current_state
+
+
+@app.callback(
+    Output('trend-tab-content', 'children'),
+    [Input('trend-tabs', 'active_tab'),
+     Input('start-date-picker', 'date'),
+     Input('end-date-picker', 'date'),
+     Input('device-dropdown', 'value')]
+)
+def render_trend_tab(active_tab, start_date, end_date, selected_devices):
+    if active_tab == 'oee-trend':
+        return html.Div([
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("趋势类型"),
+                        dbc.CardBody([
+                            dbc.RadioItems(
+                                id='trend-type',
+                                options=[
+                                    {'label': '日趋势', 'value': '日'},
+                                    {'label': '周趋势', 'value': '周'},
+                                    {'label': '月趋势', 'value': '月'},
+                                ],
+                                value='日',
+                                inline=True,
+                            ),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=4),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("显示设置"),
+                        dbc.CardBody([
+                            dbc.Checklist(
+                                id='trend-options',
+                                options=[
+                                    {'label': '显示7日移动平均线', 'value': 'moving_avg'},
+                                    {'label': '显示三因子趋势', 'value': 'show_factors'},
+                                ],
+                                value=['moving_avg'],
+                                inline=True,
+                            ),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=8),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("OEE趋势图"),
+                        dbc.CardBody([
+                            dcc.Graph(id='trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("单设备三因子趋势"),
+                        dbc.CardBody([
+                            dcc.Dropdown(
+                                id='factor-trend-device',
+                                placeholder="选择设备查看三因子趋势",
+                                className="mb-3",
+                            ),
+                            dcc.Graph(id='factor-trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+        ])
+    elif active_tab == 'health-trend':
+        return html.Div([
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("设备选择"),
+                        dbc.CardBody([
+                            dcc.Dropdown(
+                                id='health-trend-devices',
+                                multi=True,
+                                placeholder="选择设备（最多5台）",
+                                className="mb-2",
+                            ),
+                            html.Small("支持多设备叠加对比，最多选择5台设备", className="text-muted"),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            "健康分趋势图",
+                            html.Small(" （基于7天滑动窗口计算）", className="text-muted ms-2"),
+                        ]),
+                        dbc.CardBody([
+                            dcc.Graph(id='health-trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("等级说明"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#198754',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("优秀 (90-100分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#0d6efd',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("良好 (70-89分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#fd7e14',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("关注 (50-69分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#dc3545',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("警告 (0-49分)"),
+                                    ]),
+                                ], width=3),
+                            ]),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+        ])
+    return html.Div("")
+
+
+@app.callback(
+    Output('health-trend-devices', 'options'),
+    [Input('data-loaded-store', 'data'),
+     Input('url', 'pathname')]
+)
+def update_health_trend_devices(data_loaded, pathname):
+    _, _, device_options, _ = get_date_and_devices_from_store()
+    return device_options
+
+
+@app.callback(
+    Output('health-trend-devices', 'value'),
+    [Input('health-trend-devices', 'options')]
+)
+def set_default_health_devices(options):
+    if options and len(options) > 0:
+        return [options[0]['value']]
+    return []
+
+
+@app.callback(
+    Output('health-trend-chart', 'figure'),
+    [Input('start-date-picker', 'date'),
+     Input('end-date-picker', 'date'),
+     Input('health-trend-devices', 'value')]
+)
+def update_health_trend_chart(start_date, end_date, selected_devices):
+    if DATA_STORE['processed_df'] is None or not start_date or not end_date:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title="请先导入数据")
+        return empty_fig
+    
+    df = DATA_STORE['processed_df']
+    
+    if not selected_devices:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title="请选择至少一台设备")
+        return empty_fig
+    
+    if len(selected_devices) > 5:
+        selected_devices = selected_devices[:5]
+    
+    fig = go.Figure()
+    
+    import plotly.express as px
+    
+    colors = px.colors.qualitative.Set1
+    
+    for idx, device_id in enumerate(selected_devices):
+        trend_data = calculate_health_score_trend(
+            df, device_id, start_date, end_date, 
+            DEFAULT_TAKT.get(device_id), 7
+        )
+        
+        if len(trend_data) == 0:
+            continue
+        
+        color = colors[idx % len(colors)]
+        
+        fig.add_trace(
+            go.Scatter(
+                x=trend_data['日期'],
+                y=trend_data['健康分'],
+                mode='lines+markers',
+                name=f'{device_id} 健康分',
+                line=dict(color=color, width=2),
+                marker=dict(size=6),
+            )
+        )
+    
+    fig.add_hline(
+        y=90,
+        line_dash="dash",
+        line_color="#198754",
+        annotation_text="优秀 (90分)",
+        annotation_position="top right",
+        opacity=0.7,
+    )
+    
+    fig.add_hline(
+        y=70,
+        line_dash="dash",
+        line_color="#0d6efd",
+        annotation_text="良好 (70分)",
+        annotation_position="top right",
+        opacity=0.7,
+    )
+    
+    fig.add_hline(
+        y=50,
+        line_dash="dash",
+        line_color="#fd7e14",
+        annotation_text="关注 (50分)",
+        annotation_position="top right",
+        opacity=0.7,
+    )
+    
+    fig.update_layout(
+        title='设备健康分趋势图（7日滑动窗口）',
+        xaxis_title='日期',
+        yaxis_title='健康分',
+        yaxis=dict(range=[0, 105]),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=500,
+    )
+    
+    return fig
 
 
 @app.callback(
@@ -1342,9 +1873,11 @@ def update_benchmark(start_date, end_date, selected_devices, shift_device):
     Output('anomaly-cards', 'children'),
     [Input('anomaly-oee-target', 'value'),
      Input('anomaly-drop-threshold', 'value'),
-     Input('anomaly-consecutive-days', 'value')]
+     Input('anomaly-consecutive-days', 'value'),
+     Input('previous-health-scores', 'data'),
+     Input('current-health-scores', 'data')]
 )
-def update_anomaly_detection(oee_target, drop_threshold, consecutive_days):
+def update_anomaly_detection(oee_target, drop_threshold, consecutive_days, prev_scores, current_scores):
     if DATA_STORE['processed_df'] is None:
         return html.Div("请先导入数据", className="text-muted p-5 text-center")
     
@@ -1364,6 +1897,12 @@ def update_anomaly_detection(oee_target, drop_threshold, consecutive_days):
         )
         anomalies.extend(device_anomalies)
     
+    if prev_scores and current_scores:
+        health_drop_anomalies = detect_health_score_drop_anomalies(
+            df, current_scores, prev_scores, drop_threshold=15
+        )
+        anomalies.extend(health_drop_anomalies)
+    
     if not anomalies:
         return dbc.Alert("✅ 未检测到异常，所有设备运行正常！", color="success", className="text-center")
     
@@ -1379,6 +1918,27 @@ def update_anomaly_detection(oee_target, drop_threshold, consecutive_days):
                 html.P(f"7日均值: {a['7日均值']*100:.2f}%"),
                 html.P(f"下降幅度: {a['下降幅度']*100:.1f} 个百分点"),
                 html.P(f"主要归因: {a['主要归因因子']} (下降{a['因子下降']*100:.1f}个百分点)"),
+            ])
+        elif a['类型'] == '健康分骤降':
+            color = "danger"
+            icon = "💔"
+            title = f"健康分骤降告警 - {a['设备']}"
+            body = html.Div([
+                html.H6("健康评分对比"),
+                html.P([
+                    html.Strong("上次评分: "),
+                    html.Span(f"{a['上次评分']}分", style={'color': '#198754', 'fontWeight': 'bold'}),
+                    html.Span(" → "),
+                    html.Strong("本次评分: "),
+                    html.Span(f"{a['本次评分']}分", style={'color': '#dc3545', 'fontWeight': 'bold'}),
+                ]),
+                html.P(f"下降幅度: {a['下降幅度']} 分", 
+                       style={'color': '#dc3545', 'fontWeight': 'bold'}),
+                html.Hr(className="my-2"),
+                html.H6("初步归因分析"),
+                html.P(f"最大降幅因子: {a['主要归因因子']}"),
+                html.P(f"该因子下降: {a['因子下降']*100:.1f} 个百分点"),
+                html.Small("点击跳转到停机归因分析页面查看详情", className="text-muted"),
             ])
         else:
             color = "warning"
