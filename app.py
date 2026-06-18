@@ -276,7 +276,7 @@ def get_trend_analysis_layout():
             dbc.Tab(label="健康分趋势", tab_id="health-trend"),
         ], id="trend-tabs", active_tab="oee-trend", className="mb-4"),
         
-        html.Div(id='oee-trend-content', children=[
+        html.Div(id='oee-trend-content', style={'display': 'block'}, children=[
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
@@ -341,7 +341,7 @@ def get_trend_analysis_layout():
             ], className="mb-4"),
         ]),
         
-        html.Div(id='health-trend-content', children=[
+        html.Div(id='health-trend-content', style={'display': 'none'}, children=[
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
@@ -647,39 +647,24 @@ app.layout = html.Div([
 
 
 @app.callback(
-    [Output('page-content', 'children'),
-     Output('url-device-param', 'data')],
-    [Input('url', 'href')]
+    Output('page-content', 'children'),
+    [Input('url', 'pathname')]
 )
-def display_page(href):
-    import urllib.parse
-    
-    pathname = '/'
-    device_param = None
-    
-    if href:
-        parsed = urllib.parse.urlparse(href)
-        pathname = parsed.path
-        
-        if parsed.query:
-            params = urllib.parse.parse_qs(parsed.query)
-            if 'device' in params:
-                device_param = params['device'][0]
-    
+def display_page(pathname):
     if pathname == '/data-import':
-        return get_data_import_layout(), device_param
+        return get_data_import_layout()
     elif pathname == '/trend-analysis':
-        return get_trend_analysis_layout(), device_param
+        return get_trend_analysis_layout()
     elif pathname == '/downtime-analysis':
-        return get_downtime_analysis_layout(), device_param
+        return get_downtime_analysis_layout()
     elif pathname == '/benchmark':
-        return get_benchmark_layout(), device_param
+        return get_benchmark_layout()
     elif pathname == '/anomaly':
-        return get_anomaly_layout(), device_param
+        return get_anomaly_layout()
     elif pathname == '/report':
-        return get_report_layout(), device_param
+        return get_report_layout()
     else:
-        return get_overview_layout(), device_param
+        return get_overview_layout()
 
 
 def parse_contents(contents, filename):
@@ -715,7 +700,7 @@ def parse_contents(contents, filename):
     [State('upload-data', 'filename'),
      State('current-health-scores', 'data')]
 )
-def handle_file_upload(contents, n_clicks, filename, prev_health_scores):
+def handle_file_upload(contents, n_clicks, filename, old_current_scores):
     ctx = dash.callback_context
     
     if not ctx.triggered:
@@ -878,10 +863,7 @@ def handle_file_upload(contents, n_clicks, filename, prev_health_scores):
         
         current_scores_dict = convert_scores_to_serializable({k: v for k, v in health_scores.items()})
     
-    if current_scores_dict:
-        new_previous_scores = prev_health_scores
-    else:
-        new_previous_scores = {}
+    new_previous_scores = old_current_scores if old_current_scores else {}
     
     return upload_status, error_list, preview, data_loaded, health_preview, new_previous_scores, current_scores_dict
 
@@ -1120,11 +1102,13 @@ def update_health_score_cards(start_date, end_date, selected_devices):
 
 
 @app.callback(
-    Output('url', 'href'),
+    [Output('url', 'pathname'),
+     Output('url-device-param', 'data')],
     [Input({'type': 'health-card', 'index': ALL}, 'n_clicks')],
-    [State('url', 'href')]
+    [State('url', 'pathname'),
+     State('url-device-param', 'data')]
 )
-def health_card_click(n_clicks, current_href):
+def health_card_click(n_clicks, current_path, current_device_param):
     ctx = dash.callback_context
     
     if not n_clicks or all(c is None for c in n_clicks):
@@ -1150,7 +1134,7 @@ def health_card_click(n_clicks, current_href):
         raise dash.exceptions.PreventUpdate
     
     if device_id:
-        return f'/downtime-analysis?device={device_id}'
+        return '/downtime-analysis', device_id
     
     raise dash.exceptions.PreventUpdate
 
