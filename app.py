@@ -276,7 +276,171 @@ def get_trend_analysis_layout():
             dbc.Tab(label="健康分趋势", tab_id="health-trend"),
         ], id="trend-tabs", active_tab="oee-trend", className="mb-4"),
         
-        html.Div(id='trend-tab-content'),
+        html.Div(id='oee-trend-content', children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("趋势类型"),
+                        dbc.CardBody([
+                            dbc.RadioItems(
+                                id='trend-type',
+                                options=[
+                                    {'label': '日趋势', 'value': '日'},
+                                    {'label': '周趋势', 'value': '周'},
+                                    {'label': '月趋势', 'value': '月'},
+                                ],
+                                value='日',
+                                inline=True,
+                            ),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=4),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("显示设置"),
+                        dbc.CardBody([
+                            dbc.Checklist(
+                                id='trend-options',
+                                options=[
+                                    {'label': '显示7日移动平均线', 'value': 'moving_avg'},
+                                    {'label': '显示三因子趋势', 'value': 'show_factors'},
+                                ],
+                                value=['moving_avg'],
+                                inline=True,
+                            ),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=8),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("OEE趋势图"),
+                        dbc.CardBody([
+                            dcc.Graph(id='trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("单设备三因子趋势"),
+                        dbc.CardBody([
+                            dcc.Dropdown(
+                                id='factor-trend-device',
+                                placeholder="选择设备查看三因子趋势",
+                                className="mb-3",
+                            ),
+                            dcc.Graph(id='factor-trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+        ]),
+        
+        html.Div(id='health-trend-content', children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("设备选择"),
+                        dbc.CardBody([
+                            dcc.Dropdown(
+                                id='health-trend-devices',
+                                multi=True,
+                                placeholder="选择设备（最多5台）",
+                                className="mb-2",
+                            ),
+                            html.Small("支持多设备叠加对比，最多选择5台设备", className="text-muted"),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            "健康分趋势图",
+                            html.Small(" （基于7天滑动窗口计算）", className="text-muted ms-2"),
+                        ]),
+                        dbc.CardBody([
+                            dcc.Graph(id='health-trend-chart'),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+            
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("等级说明"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#198754',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("优秀 (90-100分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#0d6efd',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("良好 (70-89分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#fd7e14',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("关注 (50-69分)"),
+                                    ]),
+                                ], width=3),
+                                dbc.Col([
+                                    html.Div([
+                                        html.Span(" ", style={
+                                            'display': 'inline-block',
+                                            'width': '20px',
+                                            'height': '20px',
+                                            'backgroundColor': '#dc3545',
+                                            'borderRadius': '3px',
+                                            'marginRight': '8px',
+                                            'verticalAlign': 'middle',
+                                        }),
+                                        html.Strong("警告 (0-49分)"),
+                                    ]),
+                                ], width=3),
+                            ]),
+                        ]),
+                    ], className="shadow-sm"),
+                ], width=12),
+            ], className="mb-4"),
+        ]),
         
     ], fluid=True)
 
@@ -712,9 +876,33 @@ def handle_file_upload(contents, n_clicks, filename, prev_health_scores):
             html.Small("💡 数据不足7天时，评分仅供参考", className="text-muted") if has_insufficient_data else None,
         ])
         
-        current_scores_dict = {k: v for k, v in health_scores.items()}
+        current_scores_dict = convert_scores_to_serializable({k: v for k, v in health_scores.items()})
     
-    return upload_status, error_list, preview, data_loaded, health_preview, prev_health_scores, current_scores_dict
+    if current_scores_dict:
+        new_previous_scores = prev_health_scores
+    else:
+        new_previous_scores = {}
+    
+    return upload_status, error_list, preview, data_loaded, health_preview, new_previous_scores, current_scores_dict
+
+
+def convert_scores_to_serializable(scores_dict):
+    if not scores_dict:
+        return {}
+    result = {}
+    for device, data in scores_dict.items():
+        serializable = {}
+        for k, v in data.items():
+            if isinstance(v, (np.integer,)):
+                serializable[k] = int(v)
+            elif isinstance(v, (np.floating,)):
+                serializable[k] = float(v)
+            elif isinstance(v, (np.bool_,)):
+                serializable[k] = bool(v)
+            else:
+                serializable[k] = v
+        result[device] = serializable
+    return result
 
 
 def get_date_and_devices_from_store():
@@ -932,18 +1120,25 @@ def update_health_score_cards(start_date, end_date, selected_devices):
 
 
 @app.callback(
-    Output('url', 'pathname'),
+    Output('url', 'href'),
     [Input({'type': 'health-card', 'index': ALL}, 'n_clicks')],
-    [State('url', 'pathname')]
+    [State('url', 'href')]
 )
-def health_card_click(n_clicks, current_path):
+def health_card_click(n_clicks, current_href):
     ctx = dash.callback_context
+    
+    if not n_clicks or all(c is None for c in n_clicks):
+        raise dash.exceptions.PreventUpdate
     
     if not ctx.triggered:
         raise dash.exceptions.PreventUpdate
     
     triggered = ctx.triggered[0]['prop_id']
     if 'health-card' not in triggered:
+        raise dash.exceptions.PreventUpdate
+    
+    trigger_value = ctx.triggered[0]['value']
+    if trigger_value is None or trigger_value == 0:
         raise dash.exceptions.PreventUpdate
     
     try:
@@ -1364,180 +1559,15 @@ def update_drilldown(start_date, end_date, selected_devices, btn_clicks, current
 
 
 @app.callback(
-    Output('trend-tab-content', 'children'),
-    [Input('trend-tabs', 'active_tab'),
-     Input('start-date-picker', 'date'),
-     Input('end-date-picker', 'date'),
-     Input('device-dropdown', 'value')]
+    [Output('oee-trend-content', 'style'),
+     Output('health-trend-content', 'style')],
+    [Input('trend-tabs', 'active_tab')]
 )
-def render_trend_tab(active_tab, start_date, end_date, selected_devices):
+def toggle_trend_tabs(active_tab):
     if active_tab == 'oee-trend':
-        return html.Div([
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("趋势类型"),
-                        dbc.CardBody([
-                            dbc.RadioItems(
-                                id='trend-type',
-                                options=[
-                                    {'label': '日趋势', 'value': '日'},
-                                    {'label': '周趋势', 'value': '周'},
-                                    {'label': '月趋势', 'value': '月'},
-                                ],
-                                value='日',
-                                inline=True,
-                            ),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=4),
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("显示设置"),
-                        dbc.CardBody([
-                            dbc.Checklist(
-                                id='trend-options',
-                                options=[
-                                    {'label': '显示7日移动平均线', 'value': 'moving_avg'},
-                                    {'label': '显示三因子趋势', 'value': 'show_factors'},
-                                ],
-                                value=['moving_avg'],
-                                inline=True,
-                            ),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=8),
-            ], className="mb-4"),
-            
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("OEE趋势图"),
-                        dbc.CardBody([
-                            dcc.Graph(id='trend-chart'),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=12),
-            ], className="mb-4"),
-            
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("单设备三因子趋势"),
-                        dbc.CardBody([
-                            dcc.Dropdown(
-                                id='factor-trend-device',
-                                placeholder="选择设备查看三因子趋势",
-                                className="mb-3",
-                            ),
-                            dcc.Graph(id='factor-trend-chart'),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=12),
-            ], className="mb-4"),
-        ])
-    elif active_tab == 'health-trend':
-        return html.Div([
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("设备选择"),
-                        dbc.CardBody([
-                            dcc.Dropdown(
-                                id='health-trend-devices',
-                                multi=True,
-                                placeholder="选择设备（最多5台）",
-                                className="mb-2",
-                            ),
-                            html.Small("支持多设备叠加对比，最多选择5台设备", className="text-muted"),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=12),
-            ], className="mb-4"),
-            
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader([
-                            "健康分趋势图",
-                            html.Small(" （基于7天滑动窗口计算）", className="text-muted ms-2"),
-                        ]),
-                        dbc.CardBody([
-                            dcc.Graph(id='health-trend-chart'),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=12),
-            ], className="mb-4"),
-            
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("等级说明"),
-                        dbc.CardBody([
-                            dbc.Row([
-                                dbc.Col([
-                                    html.Div([
-                                        html.Span(" ", style={
-                                            'display': 'inline-block',
-                                            'width': '20px',
-                                            'height': '20px',
-                                            'backgroundColor': '#198754',
-                                            'borderRadius': '3px',
-                                            'marginRight': '8px',
-                                            'verticalAlign': 'middle',
-                                        }),
-                                        html.Strong("优秀 (90-100分)"),
-                                    ]),
-                                ], width=3),
-                                dbc.Col([
-                                    html.Div([
-                                        html.Span(" ", style={
-                                            'display': 'inline-block',
-                                            'width': '20px',
-                                            'height': '20px',
-                                            'backgroundColor': '#0d6efd',
-                                            'borderRadius': '3px',
-                                            'marginRight': '8px',
-                                            'verticalAlign': 'middle',
-                                        }),
-                                        html.Strong("良好 (70-89分)"),
-                                    ]),
-                                ], width=3),
-                                dbc.Col([
-                                    html.Div([
-                                        html.Span(" ", style={
-                                            'display': 'inline-block',
-                                            'width': '20px',
-                                            'height': '20px',
-                                            'backgroundColor': '#fd7e14',
-                                            'borderRadius': '3px',
-                                            'marginRight': '8px',
-                                            'verticalAlign': 'middle',
-                                        }),
-                                        html.Strong("关注 (50-69分)"),
-                                    ]),
-                                ], width=3),
-                                dbc.Col([
-                                    html.Div([
-                                        html.Span(" ", style={
-                                            'display': 'inline-block',
-                                            'width': '20px',
-                                            'height': '20px',
-                                            'backgroundColor': '#dc3545',
-                                            'borderRadius': '3px',
-                                            'marginRight': '8px',
-                                            'verticalAlign': 'middle',
-                                        }),
-                                        html.Strong("警告 (0-49分)"),
-                                    ]),
-                                ], width=3),
-                            ]),
-                        ]),
-                    ], className="shadow-sm"),
-                ], width=12),
-            ], className="mb-4"),
-        ])
-    return html.Div("")
+        return {'display': 'block'}, {'display': 'none'}
+    else:
+        return {'display': 'none'}, {'display': 'block'}
 
 
 @app.callback(
