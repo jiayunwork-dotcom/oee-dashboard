@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import io
 import base64
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import json
 
 from src.data_import import validate_csv, process_dataframe, load_csv, get_device_list, get_date_range
@@ -22,6 +22,10 @@ from src.health_score import (
     calculate_all_health_scores, calculate_health_score_trend,
     calculate_health_score_for_device,
     get_health_level, detect_health_score_drop_anomalies
+)
+from src.predictive_maintenance import (
+    generate_full_maintenance_schedule, get_urgency_color,
+    get_urgency_level
 )
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
@@ -54,6 +58,7 @@ def get_navbar():
                     dbc.NavItem(dbc.NavLink("🔧 停机归因", href="/downtime-analysis", active="exact")),
                     dbc.NavItem(dbc.NavLink("🏆 对标分析", href="/benchmark", active="exact")),
                     dbc.NavItem(dbc.NavLink("⚠️ 异常检测", href="/anomaly", active="exact")),
+                    dbc.NavItem(dbc.NavLink("🔧 维保排程", href="/maintenance-schedule", active="exact")),
                     dbc.NavItem(dbc.NavLink("📄 报告导出", href="/report", active="exact")),
                 ],
                 pills=True,
@@ -570,6 +575,157 @@ def get_anomaly_layout():
     ], fluid=True)
 
 
+def get_maintenance_schedule_layout():
+    return dbc.Container([
+        html.H2("🔧 维保排程优化", className="mb-4 mt-3"),
+        
+        dbc.Card([
+            dbc.CardHeader([
+                html.Div([
+                    html.H5("排程参数设置", className="mb-0"),
+                    html.Small(" 基于威布尔分布的预防性维护排程优化", className="text-muted ms-2"),
+                ]),
+            ]),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("排程时间范围(天)", className="form-label"),
+                        dbc.Input(
+                            id='schedule-horizon',
+                            type='number',
+                            value=7,
+                            min=3,
+                            max=30,
+                            step=1,
+                        ),
+                    ], width=3),
+                    dbc.Col([
+                        html.Label("可靠度阈值(%)", className="form-label"),
+                        dbc.Input(
+                            id='reliability-threshold',
+                            type='number',
+                            value=70,
+                            min=50,
+                            max=95,
+                            step=5,
+                        ),
+                    ], width=3),
+                    dbc.Col([
+                        html.Label("强制维护健康分阈值", className="form-label"),
+                        dbc.Input(
+                            id='health-threshold',
+                            type='number',
+                            value=50,
+                            min=30,
+                            max=80,
+                            step=5,
+                        ),
+                    ], width=3),
+                    dbc.Col([
+                        html.Label("&nbsp;", className="form-label d-block"),
+                        dbc.Button("📊 生成排程", id='generate-schedule-btn', color="primary", className="w-100"),
+                    ], width=3),
+                ]),
+            ]),
+        ], className="shadow-sm mb-4"),
+        
+        dbc.Row(id='schedule-kpi-cards', className="mb-4"),
+        
+        dbc.Card([
+            dbc.CardHeader([
+                html.Div([
+                    html.H5("排程甘特图", className="mb-0"),
+                    html.Small(" 横轴: 未来7天维护时段 | 纵轴: 各设备 | 色块颜色表示紧迫度", className="text-muted ms-2"),
+                ]),
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Span(" ", style={
+                                'display': 'inline-block',
+                                'width': '20px',
+                                'height': '20px',
+                                'backgroundColor': '#dc3545',
+                                'borderRadius': '3px',
+                                'marginRight': '8px',
+                                'verticalAlign': 'middle',
+                            }),
+                            html.Strong("紧急"),
+                            html.Span("  (≤48小时或健康分<50)", className="text-muted ms-1 me-4"),
+                            html.Span(" ", style={
+                                'display': 'inline-block',
+                                'width': '20px',
+                                'height': '20px',
+                                'backgroundColor': '#fd7e14',
+                                'borderRadius': '3px',
+                                'marginRight': '8px',
+                                'verticalAlign': 'middle',
+                            }),
+                            html.Strong("临近"),
+                            html.Span("  (≤7天)", className="text-muted ms-1 me-4"),
+                            html.Span(" ", style={
+                                'display': 'inline-block',
+                                'width': '20px',
+                                'height': '20px',
+                                'backgroundColor': '#198754',
+                                'borderRadius': '3px',
+                                'marginRight': '8px',
+                                'verticalAlign': 'middle',
+                            }),
+                            html.Strong("充裕"),
+                            html.Span("  (>7天)", className="text-muted ms-1 me-4"),
+                            html.Span(" ", style={
+                                'display': 'inline-block',
+                                'width': '20px',
+                                'height': '20px',
+                                'backgroundColor': '#6c757d',
+                                'borderRadius': '3px',
+                                'marginRight': '8px',
+                                'verticalAlign': 'middle',
+                            }),
+                            html.Strong("数据不足"),
+                            html.Span("  (故障记录<3次)", className="text-muted ms-1"),
+                        ], style={'fontSize': '0.875rem'}),
+                    ], width=12),
+                ], className="mt-2"),
+            ]),
+            dbc.CardBody([
+                dcc.Graph(id='maintenance-gantt-chart'),
+            ]),
+        ], className="shadow-sm mb-4"),
+        
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Div([
+                            html.H5("📋 维护排程列表", className="mb-0"),
+                            html.Div([
+                                dbc.Button(
+                                    "📅 导出iCalendar(.ics)",
+                                    id='export-ics-btn',
+                                    color="success",
+                                    size="sm",
+                                ),
+                                dcc.Download(id='download-ics'),
+                            ]),
+                        ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
+                    ]),
+                    dbc.CardBody(id='schedule-list'),
+                ], className="shadow-sm"),
+            ], width=12),
+        ], className="mb-4"),
+        
+        dbc.Card([
+            dbc.CardHeader([
+                html.H5("📊 设备威布尔参数与可靠度", className="mb-0"),
+                html.Small(" 基于历史故障数据拟合威布尔分布(形状参数β, 尺度参数η)", className="text-muted ms-2"),
+            ]),
+            dbc.CardBody(id='weibull-params-panel'),
+        ], className="shadow-sm mb-4"),
+        
+    ], fluid=True)
+
+
 def get_report_layout():
     return dbc.Container([
         html.H2("📄 报告导出", className="mb-4 mt-3"),
@@ -661,6 +817,8 @@ def display_page(pathname):
         return get_benchmark_layout()
     elif pathname == '/anomaly':
         return get_anomaly_layout()
+    elif pathname == '/maintenance-schedule':
+        return get_maintenance_schedule_layout()
     elif pathname == '/report':
         return get_report_layout()
     else:
@@ -2024,6 +2182,688 @@ def generate_report(n_clicks, report_type, start_date, end_date):
     except Exception as e:
         return dbc.Alert(f"报告生成失败: {str(e)}", color="danger"), \
                html.Div("")
+
+
+SCHEDULE_STORE = {
+    'schedule': None,
+}
+
+
+def create_maintenance_gantt_chart(schedule_result):
+    if not schedule_result or not schedule_result.get('排程结果'):
+        fig = go.Figure()
+        fig.update_layout(title="请先导入数据并生成排程")
+        return fig
+
+    assignments = schedule_result['排程结果']
+    device_infos = schedule_result['设备信息']
+    current_time = schedule_result.get('当前时间', datetime.now())
+    if hasattr(current_time, 'to_pydatetime'):
+        current_time = current_time.to_pydatetime()
+    horizon_days = 7
+
+    device_list = sorted([info['设备编号'] for info in device_infos])
+
+    fig = go.Figure()
+
+    for device_idx, device_id in enumerate(device_list):
+        device_info = next((i for i in device_infos if i['设备编号'] == device_id), None)
+        device_assignments = [a for a in assignments if a['设备编号'] == device_id]
+
+        for assignment in device_assignments:
+            start = assignment['维护开始时间']
+            end = assignment['维护结束时间']
+            urgency = assignment['紧迫度']
+            color = get_urgency_color(urgency)
+
+            hover_text = (
+                f"设备: {device_id}<br>"
+                f"紧迫度: {urgency}<br>"
+                f"维护时段: {start.strftime('%Y-%m-%d %H:%M')} - {end.strftime('%H:%M')}<br>"
+                f"班次: {assignment['班次']} ({assignment['时段类型']})<br>"
+                f"健康分: {assignment['健康分']}分<br>"
+            )
+            if assignment.get('当前可靠度') is not None:
+                hover_text += f"当前可靠度: {assignment['当前可靠度']*100:.1f}%<br>"
+            if assignment.get('建议窗口Δt小时') is not None:
+                hover_text += f"建议维护窗口: {assignment['建议窗口Δt小时']:.1f}小时后<br>"
+            hover_text += f"分配方式: {assignment['分配备注']}"
+
+            if assignment.get('强制优先'):
+                hover_text += "<br><b>⚠️ 健康分低于阈值，强制优先</b>"
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[start, end],
+                    y=[device_idx, device_idx],
+                    mode='lines',
+                    line=dict(color=color, width=25),
+                    name=f"{device_id} - {urgency}",
+                    showlegend=False,
+                    hovertext=hover_text,
+                    hoverinfo='text',
+                )
+            )
+
+            if assignment.get('建议维护时间'):
+                pass
+
+    fig.add_shape(
+        type="line",
+        x0=current_time,
+        x1=current_time,
+        y0=0,
+        y1=1,
+        yref='paper',
+        line=dict(color="#0d6efd", width=2, dash="dash"),
+    )
+    fig.add_annotation(
+        x=current_time,
+        y=1.0,
+        yref='paper',
+        text="当前时间",
+        showarrow=False,
+        xanchor='left',
+        font=dict(color="#0d6efd"),
+    )
+
+    fig.update_yaxes(
+        tickvals=list(range(len(device_list))),
+        ticktext=device_list,
+        autorange='reversed',
+        title='设备',
+    )
+
+    horizon_end = current_time + timedelta(days=horizon_days)
+    fig.update_xaxes(
+        title='时间',
+        range=[current_time - timedelta(hours=2), horizon_end + timedelta(hours=2)],
+    )
+
+    legend_items = [
+        ('紧急', '#dc3545'),
+        ('临近', '#fd7e14'),
+        ('充裕', '#198754'),
+        ('数据不足', '#6c757d'),
+    ]
+
+    for name, color in legend_items:
+        count = sum(1 for a in assignments if a['紧迫度'] == name)
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode='lines',
+                line=dict(color=color, width=10),
+                name=f"{name} ({count}台)",
+                showlegend=True,
+            )
+        )
+
+    fig.update_layout(
+        title='预防性维护排程甘特图（未来7天）',
+        height=max(400, len(device_list) * 60),
+        hovermode='closest',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+
+    return fig
+
+
+def create_schedule_list_table(schedule_result):
+    if not schedule_result or not schedule_result.get('排程结果'):
+        return html.Div("请先导入数据并生成排程", className="text-muted text-center p-5")
+
+    assignments = sorted(schedule_result['排程结果'], key=lambda x: x['维护开始时间'])
+    unassigned = schedule_result.get('未分配设备', [])
+
+    if not assignments:
+        content = html.Div("⚠️ 暂无排程结果", className="text-warning text-center p-3")
+    else:
+        rows = []
+        for idx, a in enumerate(assignments, 1):
+            urgency = a['紧迫度']
+            color = get_urgency_color(urgency)
+            badge_color = {
+                '紧急': 'danger',
+                '临近': 'warning',
+                '充裕': 'success',
+                '数据不足': 'secondary',
+            }.get(urgency, 'secondary')
+
+            rows.append(html.Tr([
+                html.Td(str(idx), className="text-center"),
+                html.Td(html.Strong(a['设备编号'])),
+                html.Td([
+                    html.Div(f"{a['维护开始时间'].strftime('%Y-%m-%d')}"),
+                    html.Small(
+                        f"{a['维护开始时间'].strftime('%H:%M')} - {a['维护结束时间'].strftime('%H:%M')}",
+                        className="text-muted"
+                    ),
+                ]),
+                html.Td(f"{a['班次']}班"),
+                html.Td(a['时段类型']),
+                html.Td(f"{a['维护时长分钟']}分钟"),
+                html.Td(dbc.Badge(urgency, color=badge_color)),
+                html.Td([
+                    html.Span(
+                        f"{a['健康分']}分",
+                        style={
+                            'fontWeight': 'bold',
+                            'color': '#dc3545' if a['健康分'] < 50 else '#fd7e14' if a['健康分'] < 70 else '#198754'
+                        }
+                    ),
+                ]),
+                html.Td(
+                    f"{a['当前可靠度']*100:.1f}%" if a.get('当前可靠度') is not None else
+                    html.Span("N/A", className="text-muted")
+                ),
+                html.Td(
+                    f"{a['建议窗口Δt小时']:.1f}h" if a.get('建议窗口Δt小时') is not None else
+                    html.Span("N/A", className="text-muted")
+                ),
+                html.Td([
+                    html.Span(a['分配备注']),
+                    html.Br(),
+                    html.Small(
+                        "数据不足(固定周期)" if a.get('使用默认周期') else
+                        ("威布尔拟合" if a.get('数据充足') else "数据不足"),
+                        className="text-muted"
+                    ),
+                ]),
+            ]))
+
+        content = html.Div([
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#", className="text-center"),
+                    html.Th("设备编号"),
+                    html.Th("维护时间"),
+                    html.Th("班次"),
+                    html.Th("时段"),
+                    html.Th("时长"),
+                    html.Th("紧迫度"),
+                    html.Th("健康分"),
+                    html.Th("可靠度"),
+                    html.Th("建议窗口"),
+                    html.Th("分配说明"),
+                ])),
+                html.Tbody(rows),
+            ], className="table table-sm table-hover"),
+        ])
+
+    unassigned_content = html.Div("")
+    if unassigned:
+        unassigned_rows = []
+        for idx, u in enumerate(unassigned, 1):
+            urgency = u.get('紧迫度', '未知')
+            badge_color = {
+                '紧急': 'danger',
+                '临近': 'warning',
+                '充裕': 'success',
+                '数据不足': 'secondary',
+            }.get(urgency, 'secondary')
+
+            unassigned_rows.append(html.Tr([
+                html.Td(str(idx), className="text-center"),
+                html.Td(html.Strong(u['设备编号'])),
+                html.Td(u['原因']),
+                html.Td(dbc.Badge(urgency, color=badge_color)),
+                html.Td(
+                    f"{u['建议窗口Δt小时']:.1f}小时后" if u.get('建议窗口Δt小时') is not None else "N/A"
+                ),
+            ]))
+
+        unassigned_content = dbc.Alert([
+            html.H6(f"⚠️ 有 {len(unassigned)} 台设备未能在未来7天内分配维护时段：", className="alert-heading"),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#"),
+                    html.Th("设备编号"),
+                    html.Th("原因"),
+                    html.Th("紧迫度"),
+                    html.Th("建议维护窗口"),
+                ])),
+                html.Tbody(unassigned_rows),
+            ], className="table table-sm table-warning"),
+            html.Hr(),
+            html.Small("建议：考虑扩展维护时段或在生产间隙安排额外维护", className="text-muted"),
+        ], color="warning", className="mt-4")
+
+    return html.Div([content, unassigned_content])
+
+
+def create_weibull_params_panel(schedule_result):
+    if not schedule_result or not schedule_result.get('设备信息'):
+        return html.Div("请先导入数据并生成排程", className="text-muted text-center p-5")
+
+    def _clean(children_list):
+        return [c for c in children_list if c is not None]
+
+    device_infos = schedule_result['设备信息']
+    stats = schedule_result.get('统计信息', {})
+
+    cards = []
+    for info in sorted(device_infos, key=lambda x: x['设备编号']):
+        device_id = info['设备编号']
+        health_score = info['健康分']
+        health_level = get_health_level(health_score)
+
+        beta = info.get('beta')
+        eta = info.get('eta')
+        current_R = info.get('当前可靠度')
+        delta_t = info.get('建议窗口Δt小时')
+        t_since = info.get('距上次故障小时')
+        urgency = info.get('紧迫度', '未知')
+        data_sufficient = info.get('数据充足', False)
+        use_default = info.get('使用默认周期', False)
+
+        urgency_color = get_urgency_color(urgency)
+
+        if use_default:
+            beta_display = html.Span("N/A", className="text-muted")
+            eta_display = html.Span("N/A", className="text-muted")
+            reliability_display = html.Span("N/A (固定周期)", className="text-muted")
+            window_display = html.Div([
+                html.Span("168小时", style={'fontWeight': 'bold', 'color': '#6c757d'}),
+                html.Small(" (默认7天固定周期)", className="text-muted d-block"),
+            ])
+        else:
+            beta_display = html.Span(f"{beta:.3f}" if beta else "N/A", style={'fontWeight': 'bold'})
+            eta_display = html.Span(f"{eta:.1f}h" if eta else "N/A", style={'fontWeight': 'bold'})
+            reliability_display = html.Span(
+                f"{current_R*100:.1f}%" if current_R is not None else "N/A",
+                style={
+                    'fontWeight': 'bold',
+                    'color': '#dc3545' if current_R is not None and current_R < 0.7 else '#198754'
+                }
+            )
+            window_display = html.Div([
+                html.Span(
+                    f"{delta_t:.1f}小时后" if delta_t is not None else "N/A",
+                    style={'fontWeight': 'bold', 'color': urgency_color}
+                ),
+                html.Small(
+                    f" (距上次故障已运行 {t_since:.1f}h)" if t_since is not None else "",
+                    className="text-muted d-block"
+                ),
+            ])
+
+        weibull_interpretation = ""
+        if beta is not None and not use_default:
+            if beta < 1:
+                weibull_interpretation = "早期故障期（磨合期）"
+            elif abs(beta - 1) < 0.1:
+                weibull_interpretation = "偶发故障期（随机失效）"
+            elif beta < 3:
+                weibull_interpretation = "损耗故障早期"
+            else:
+                weibull_interpretation = "损耗故障期（老化）"
+
+        card_body_children = [
+            html.Div([
+                html.Div([
+                    html.H6(device_id, className="mb-1", style={"fontWeight": "bold"}),
+                    html.Div([
+                        dbc.Badge(
+                            urgency,
+                            color={
+                                '紧急': 'danger',
+                                '临近': 'warning',
+                                '充裕': 'success',
+                                '数据不足': 'secondary',
+                            }.get(urgency, 'secondary'),
+                            className="me-2"
+                        ),
+                        html.Span(
+                            health_level['name'],
+                            style={
+                                'backgroundColor': health_level['bg_color'],
+                                'color': health_level['color'],
+                                'padding': '2px 10px',
+                                'borderRadius': '12px',
+                                'fontSize': '0.75rem',
+                                'fontWeight': 'bold',
+                            }
+                        ),
+                    ], className="mt-1"),
+                ]),
+                html.Div(
+                    f"{health_score}",
+                    style={
+                        'fontSize': '2rem',
+                        'fontWeight': 'bold',
+                        'color': health_level['color'],
+                        'lineHeight': '1',
+                    }
+                ),
+            ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'flex-start'}),
+            html.Hr(className="my-2"),
+            dbc.Row([
+                dbc.Col(_clean([
+                    html.Small("形状参数 β", className="text-muted d-block"),
+                    beta_display,
+                    html.Small(weibull_interpretation, className="text-primary d-block mt-1") if weibull_interpretation else None,
+                ]), width=6),
+                dbc.Col(_clean([
+                    html.Small("尺度参数 η", className="text-muted d-block"),
+                    eta_display,
+                    html.Small(
+                        f"特征寿命 (63.2%失效时)",
+                        className="text-muted d-block mt-1"
+                    ) if eta and not use_default else None,
+                ]), width=6),
+            ]),
+            html.Hr(className="my-2"),
+            dbc.Row([
+                dbc.Col(_clean([
+                    html.Small("当前可靠度 R(t)", className="text-muted d-block"),
+                    reliability_display,
+                ]), width=6),
+                dbc.Col(_clean([
+                    html.Small("建议维护窗口 (R≥70%)", className="text-muted d-block"),
+                    window_display,
+                ]), width=6),
+            ]),
+            html.Hr(className="my-2"),
+            html.Small(
+                f"历史故障记录: {info.get('故障次数', 0)}次 | "
+                f"故障间隔数据: {info.get('故障间隔数', 0)}条 | "
+                f"数据{'充足 ✓' if data_sufficient else '不足 ⚠️ (建议固定周期维护)'}",
+                className=
+                    "d-block mt-2 " + 
+                    ("text-success" if data_sufficient else "text-warning")
+            ),
+        ]
+        if info.get('强制优先', False):
+            card_body_children.append(
+                dbc.Badge(
+                    "⚠️ 健康分<50，强制优先维护",
+                    color="danger",
+                    className="w-100 mt-2 py-2"
+                )
+            )
+        card_body_children = [c for c in card_body_children if c is not None]
+
+        card = dbc.Col(
+            dbc.Card([
+                dbc.CardBody(card_body_children),
+            ],
+            style={
+                'borderLeft': f'4px solid {urgency_color}',
+            },
+            className="shadow-sm h-100"
+            ),
+            width=4,
+            className="mb-3",
+        )
+        cards.append(card)
+
+    summary_card = dbc.Col(
+        dbc.Card([
+            dbc.CardBody([
+                html.H6("📈 总体统计", className="mb-3", style={'fontWeight': 'bold'}),
+                dbc.Row([
+                    dbc.Col([
+                        html.Small("总设备数", className="text-muted d-block"),
+                        html.H5(f"{stats.get('总设备数', 0)}", style={'fontWeight': 'bold', 'color': '#0d6efd'}),
+                    ], width=6),
+                    dbc.Col([
+                        html.Small("已分配排程", className="text-muted d-block"),
+                        html.H5(f"{stats.get('已分配', 0)}", style={'fontWeight': 'bold', 'color': '#198754'}),
+                    ], width=6),
+                ]),
+                dbc.Row([
+                    dbc.Col([
+                        html.Small("数据充足", className="text-muted d-block"),
+                        html.H5(f"{stats.get('数据充足', 0)}", style={'fontWeight': 'bold', 'color': '#20c997'}),
+                    ], width=6),
+                    dbc.Col([
+                        html.Small("紧急设备", className="text-muted d-block"),
+                        html.H5(f"{stats.get('紧急设备', 0)}", style={'fontWeight': 'bold', 'color': '#dc3545'}),
+                    ], width=6),
+                ]),
+                dbc.Row([
+                    dbc.Col([
+                        html.Small("数据不足", className="text-muted d-block"),
+                        html.H5(f"{stats.get('数据不足', 0)}", style={'fontWeight': 'bold', 'color': '#6c757d'}),
+                    ], width=6),
+                    dbc.Col([
+                        html.Small("未分配", className="text-muted d-block"),
+                        html.H5(f"{stats.get('未分配', 0)}", style={'fontWeight': 'bold', 'color': '#fd7e14'}),
+                    ], width=6),
+                ]),
+            ]),
+        ], className="shadow-sm h-100 bg-light"),
+        width=4,
+        className="mb-3",
+    )
+
+    all_cards = [summary_card] + cards
+
+    return dbc.Row(all_cards)
+
+
+def generate_ics_file(schedule_result):
+    if not schedule_result or not schedule_result.get('排程结果'):
+        return None
+
+    assignments = schedule_result['排程结果']
+    current_time = schedule_result.get('当前时间', datetime.now())
+
+    urgency_map = {
+        '紧急': 'HIGH',
+        '临近': 'MEDIUM',
+        '充裕': 'LOW',
+        '数据不足': 'NORMAL',
+    }
+
+    lines = []
+    lines.append("BEGIN:VCALENDAR")
+    lines.append("VERSION:2.0")
+    lines.append("PRODID:-//OEE Dashboard//Maintenance Schedule//CN")
+    lines.append("CALSCALE:GREGORIAN")
+    lines.append("METHOD:PUBLISH")
+    lines.append(f"X-WR-CALNAME:OEE维保排程 - {current_time.strftime('%Y%m%d')}")
+    lines.append(f"X-WR-TIMEZONE:Asia/Shanghai")
+
+    uid_counter = 0
+    for a in assignments:
+        uid_counter += 1
+        device_id = a['设备编号']
+        start = a['维护开始时间']
+        end = a['维护结束时间']
+        urgency = a['紧迫度']
+        priority = urgency_map.get(urgency, 'NORMAL')
+
+        dtstamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+        dtstart = start.strftime('%Y%m%dT%H%M%S')
+        dtend = end.strftime('%Y%m%dT%H%M%S')
+
+        summary = f"【{urgency}】预防性维护 - {device_id}"
+
+        description_parts = [
+            f"设备编号: {device_id}",
+            f"维护类型: 预防性维护",
+            f"紧迫等级: {urgency}",
+            f"维护时长: {a['维护时长分钟']}分钟",
+            f"班次: {a['班次']}班 ({a['时段类型']})",
+            f"健康分: {a['健康分']}分",
+        ]
+        if a.get('当前可靠度') is not None:
+            description_parts.append(f"当前可靠度: {a['当前可靠度']*100:.1f}%")
+        if a.get('建议窗口Δt小时') is not None:
+            description_parts.append(f"建议维护窗口: {a['建议窗口Δt小时']:.1f}小时后")
+        if a.get('威布尔beta') is not None:
+            description_parts.append(f"威布尔参数: β={a['威布尔beta']:.3f}, η={a['威布尔eta']:.1f}h")
+        description_parts.append(f"分配方式: {a['分配备注']}")
+        if a.get('强制优先'):
+            description_parts.append("⚠️ 健康分低于阈值，强制优先维护")
+
+        description = "\\n".join(description_parts)
+
+        lines.append("BEGIN:VEVENT")
+        lines.append(f"UID:oee-maint-{uid_counter}-{start.strftime('%Y%m%d%H%M')}@oee-dashboard")
+        lines.append(f"DTSTAMP:{dtstamp}")
+        lines.append(f"DTSTART:{dtstart}")
+        lines.append(f"DTEND:{dtend}")
+        lines.append(f"SUMMARY:{summary}")
+        lines.append(f"DESCRIPTION:{description}")
+        lines.append(f"PRIORITY:{'1' if priority == 'HIGH' else '3' if priority == 'MEDIUM' else '5'}")
+        lines.append(f"STATUS:CONFIRMED")
+        lines.append("TRANSP:OPAQUE")
+        lines.append(f"LOCATION:车间 - {device_id}工位")
+        lines.append(f"CATEGORIES:MAINTENANCE,OEE,{urgency.upper()}")
+        if priority == 'HIGH':
+            lines.append("BEGIN:VALARM")
+            lines.append("TRIGGER:-PT24H")
+            lines.append("ACTION:DISPLAY")
+            lines.append("DESCRIPTION:紧急维护任务提醒")
+            lines.append("END:VALARM")
+            lines.append("BEGIN:VALARM")
+            lines.append("TRIGGER:-PT1H")
+            lines.append("ACTION:DISPLAY")
+            lines.append("DESCRIPTION:紧急维护任务即将开始")
+            lines.append("END:VALARM")
+        elif priority == 'MEDIUM':
+            lines.append("BEGIN:VALARM")
+            lines.append("TRIGGER:-PT12H")
+            lines.append("ACTION:DISPLAY")
+            lines.append("DESCRIPTION:维护任务提醒")
+            lines.append("END:VALARM")
+        lines.append("END:VEVENT")
+
+    lines.append("END:VCALENDAR")
+
+    return "\r\n".join(lines)
+
+
+@app.callback(
+    [Output('schedule-kpi-cards', 'children'),
+     Output('maintenance-gantt-chart', 'figure'),
+     Output('schedule-list', 'children'),
+     Output('weibull-params-panel', 'children')],
+    [Input('generate-schedule-btn', 'n_clicks'),
+     Input('schedule-horizon', 'value'),
+     Input('reliability-threshold', 'value'),
+     Input('health-threshold', 'value')]
+)
+def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thresh):
+    if DATA_STORE['processed_df'] is None:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title="请先导入数据")
+        no_data = html.Div("请先导入数据", className="text-muted text-center p-5")
+        kpi_cards = [
+            dbc.Col(get_kpi_card("总设备数", "--", "请先导入数据", "primary", "🔧"), width=3),
+            dbc.Col(get_kpi_card("已分配", "--", "请先导入数据", "success", "✅"), width=3),
+            dbc.Col(get_kpi_card("紧急设备", "--", "请先导入数据", "danger", "⚠️"), width=3),
+            dbc.Col(get_kpi_card("数据充足", "--", "请先导入数据", "info", "📊"), width=3),
+        ]
+        return kpi_cards, empty_fig, no_data, no_data
+
+    if not n_clicks:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title="点击上方'生成排程'按钮开始")
+        hint = html.Div([
+            dbc.Alert([
+                html.H5("👆 请设置参数后点击'生成排程'按钮", className="alert-heading"),
+                html.P("系统将基于威布尔分布预测设备故障时间，并自动优化维护排程。", className="mb-0"),
+            ], color="info", className="text-center"),
+        ], className="p-5")
+        kpi_cards = [
+            dbc.Col(get_kpi_card("总设备数", "--", "生成排程后显示", "primary", "🔧"), width=3),
+            dbc.Col(get_kpi_card("已分配", "--", "生成排程后显示", "success", "✅"), width=3),
+            dbc.Col(get_kpi_card("紧急设备", "--", "生成排程后显示", "danger", "⚠️"), width=3),
+            dbc.Col(get_kpi_card("数据充足", "--", "生成排程后显示", "info", "📊"), width=3),
+        ]
+        return kpi_cards, empty_fig, hint, hint
+
+    df = DATA_STORE['processed_df']
+
+    horizon_days = max(3, min(30, int(horizon) if horizon else 7))
+
+    from src.predictive_maintenance import (
+        DEFAULT_MAINTENANCE_INTERVAL_HOURS,
+        RELIABILITY_THRESHOLD as _DEFAULT_THRESH
+    )
+    import src.predictive_maintenance as pm_module
+    if rel_threshold:
+        pm_module.RELIABILITY_THRESHOLD = float(rel_threshold) / 100.0
+    if health_thresh:
+        original_calc_device = pm_module.calculate_device_maintenance_info
+
+        def patched_calc_device_maintenance_info(df, device_id, health_score):
+            result = original_calc_device(df, device_id, health_score)
+            result['强制优先'] = health_score < int(health_thresh)
+            if health_score < int(health_thresh) and result.get('紧迫度') and result['紧迫度'] != '数据不足':
+                from src.predictive_maintenance import get_urgency_level as _gul
+                result['紧迫度'] = '紧急'
+            return result
+
+        pm_module.calculate_device_maintenance_info = patched_calc_device_maintenance_info
+
+    max_date_str = str(df['日期'].max())
+    health_scores = calculate_all_health_scores(df, max_date_str, DEFAULT_TAKT, 7)
+
+    schedule_result = generate_full_maintenance_schedule(df, health_scores, horizon_days)
+    SCHEDULE_STORE['schedule'] = schedule_result
+
+    stats = schedule_result.get('统计信息', {})
+
+    kpi_cards = [
+        dbc.Col(get_kpi_card(
+            "总设备数",
+            str(stats.get('总设备数', 0)),
+            f"数据充足: {stats.get('数据充足', 0)}台",
+            "primary",
+            "🔧"
+        ), width=3),
+        dbc.Col(get_kpi_card(
+            "已分配排程",
+            f"{stats.get('已分配', 0)}/{stats.get('总设备数', 0)}",
+            f"未分配: {stats.get('未分配', 0)}台",
+            "success" if stats.get('未分配', 0) == 0 else "warning",
+            "✅"
+        ), width=3),
+        dbc.Col(get_kpi_card(
+            "紧急设备",
+            str(stats.get('紧急设备', 0)),
+            "需立即关注并优先维护",
+            "danger" if stats.get('紧急设备', 0) > 0 else "success",
+            "⚠️"
+        ), width=3),
+        dbc.Col(get_kpi_card(
+            "威布尔拟合",
+            f"{stats.get('数据充足', 0)}台",
+            f"数据不足: {stats.get('数据不足', 0)}台(使用固定周期)",
+            "info",
+            "📊"
+        ), width=3),
+    ]
+
+    gantt_fig = create_maintenance_gantt_chart(schedule_result)
+    schedule_list = create_schedule_list_table(schedule_result)
+    weibull_panel = create_weibull_params_panel(schedule_result)
+
+    return kpi_cards, gantt_fig, schedule_list, weibull_panel
+
+
+@app.callback(
+    Output('download-ics', 'data'),
+    [Input('export-ics-btn', 'n_clicks')]
+)
+def export_ics_file(n_clicks):
+    if not n_clicks or not SCHEDULE_STORE.get('schedule'):
+        raise dash.exceptions.PreventUpdate
+
+    ics_content = generate_ics_file(SCHEDULE_STORE['schedule'])
+    if not ics_content:
+        raise dash.exceptions.PreventUpdate
+
+    current_time = SCHEDULE_STORE['schedule'].get('当前时间', datetime.now())
+    filename = f"维保排程_{current_time.strftime('%Y%m%d')}.ics"
+
+    return dcc.send_string(ics_content, filename=filename)
 
 
 if __name__ == '__main__':
