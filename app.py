@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output, State, callback, dash_table
+from dash import dcc, html, Input, Output, State, callback, dash_table, ALL, MATCH
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
@@ -40,7 +40,7 @@ DEFAULT_TAKT = {
 def get_navbar():
     return dbc.Navbar(
         dbc.Container([
-            dbc.NavbarBrand("🏭 OEE设备综合效率分析系统", className="ms-2", style={"font-size": "1.25rem"}),
+            dbc.NavbarBrand("🏭 OEE设备综合效率分析系统", className="ms-2", style={"fontSize": "1.25rem"}),
             dbc.Nav(
                 [
                     dbc.NavItem(dbc.NavLink("📊 总览", href="/", active="exact")),
@@ -66,7 +66,7 @@ def get_footer():
             html.P("© 2025 OEE设备综合效率分析系统 - 制造业智能制造解决方案", 
                    className="text-center text-muted mt-4 mb-2"),
         ),
-        style={"background-color": "#f8f9fa", "padding": "1rem 0"},
+        style={"backgroundColor": "#f8f9fa", "padding": "1rem 0"},
     )
 
 
@@ -113,13 +113,13 @@ def get_kpi_card(title, value, subtitle="", color="primary", icon="📊"):
     return dbc.Card(
         dbc.CardBody([
             html.Div([
-                html.Span(icon, style={"font-size": "2rem", "margin-right": "1rem"}),
+                html.Span(icon, style={"fontSize": "2rem", "marginRight": "1rem"}),
                 html.Div([
                     html.H5(title, className="card-title mb-1", style={"color": "#6c757d"}),
-                    html.H3(value, className="card-text mb-0", style={"color": bg_color, "font-weight": "bold"}),
+                    html.H3(value, className="card-text mb-0", style={"color": bg_color, "fontWeight": "bold"}),
                     html.Small(subtitle, className="text-muted") if subtitle else None,
                 ]),
-            ], style={"display": "flex", "align-items": "center"}),
+            ], style={"display": "flex", "alignItems": "center"}),
         ]),
         className="shadow-sm",
     )
@@ -158,6 +158,14 @@ def get_overview_layout():
                 ], className="shadow-sm"),
             ], width=6),
         ], className="mb-4"),
+        
+        dbc.Card([
+            dbc.CardHeader(html.Div([
+                "🔍 根因钻取分析",
+                html.Small(" (点击下方各层级逐步下钻定位问题)", className="text-muted ms-2"),
+            ])),
+            dbc.CardBody(id='drilldown-panel'),
+        ], className="shadow-sm mb-4"),
         
         dbc.Row([
             dbc.Col([
@@ -500,8 +508,9 @@ def get_report_layout():
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     dcc.Store(id='data-loaded-store', data=False),
+    dcc.Store(id='drilldown-state', data={}),
     get_navbar(),
-    html.Div(id='page-content'),
+    html.Div(id='page-content', style={"paddingTop": "70px"}),
     get_footer(),
 ])
 
@@ -611,9 +620,30 @@ def handle_file_upload(contents, n_clicks, filename):
     
     if errors:
         error_list = html.Div([
-            html.H6("校验错误明细:"),
-            html.Ul([html.Li(e, style={'color': '#dc3545'}) for e in errors[:20]]),
-            html.Small(f"共 {len(errors)} 个错误，仅显示前20个", className="text-muted") if len(errors) > 20 else None,
+            html.H6("数据统计:", className="text-success"),
+            html.Ul([
+                html.Li(f"记录总数: {len(df)}"),
+                html.Li(f"设备数量: {df['设备编号'].nunique()}"),
+                html.Li(f"日期范围: {df['日期'].min()} 至 {df['日期'].max()}"),
+            ]),
+            html.Hr(),
+            dbc.Alert(f"⚠️ 发现 {len(errors)} 个校验问题，请修正后重新上传", color="warning", className="mt-3"),
+            html.H6("校验错误明细:", style={"color": "#dc3545"}),
+            html.Div([
+                html.Table([
+                    html.Thead(html.Tr([
+                        html.Th("#", style={"width": "5%", "padding": "6px 10px", "backgroundColor": "#f8f9fa", "textAlign": "center"}),
+                        html.Th("错误描述", style={"padding": "6px 10px", "backgroundColor": "#f8f9fa"}),
+                    ])),
+                    html.Tbody([
+                        html.Tr([
+                            html.Td(str(i + 1), style={"padding": "4px 10px", "textAlign": "center", "borderBottom": "1px solid #dee2e6"}),
+                            html.Td(e, style={"padding": "4px 10px", "borderBottom": "1px solid #dee2e6", "color": "#dc3545"}),
+                        ]) for i, e in enumerate(errors[:50])
+                    ]),
+                ], style={"width": "100%", "borderCollapse": "collapse", "border": "1px solid #dee2e6", "borderRadius": "6px"}),
+            ], style={"maxHeight": "300px", "overflowY": "auto"}),
+            html.Small(f"共 {len(errors)} 个错误，显示前{min(len(errors), 50)}个", className="text-muted mt-2") if len(errors) > 50 else None,
         ])
     else:
         error_list = html.Div([
@@ -623,6 +653,7 @@ def handle_file_upload(contents, n_clicks, filename):
                 html.Li(f"设备数量: {df['设备编号'].nunique()}"),
                 html.Li(f"日期范围: {df['日期'].min()} 至 {df['日期'].max()}"),
             ]),
+            dbc.Alert("✅ 所有数据校验通过，无异常", color="success", className="mt-3"),
         ])
     
     return upload_status, error_list, preview, data_loaded
@@ -751,6 +782,341 @@ def update_overview(start_date, end_date, selected_devices):
     fig_gantt = create_gantt_chart(df, start_date, end_date, selected_devices)
     
     return kpi_cards, fig_breakdown, fig_ranking, fig_gantt
+
+
+@app.callback(
+    [Output('drilldown-panel', 'children'),
+     Output('drilldown-state', 'data')],
+    [Input('start-date-picker', 'date'),
+     Input('end-date-picker', 'date'),
+     Input('device-dropdown', 'value'),
+     Input({'type': 'drilldown-btn', 'index': ALL}, 'n_clicks')],
+    [State('drilldown-state', 'data')]
+)
+def update_drilldown(start_date, end_date, selected_devices, btn_clicks, current_state):
+    if DATA_STORE['processed_df'] is None or not start_date or not end_date:
+        return html.Div("请先导入数据", className="text-muted text-center p-3"), {}
+    
+    df = DATA_STORE['processed_df']
+    overall = calculate_oee_overall(df, start_date, end_date, DEFAULT_TAKT)
+    summary = overall['设备汇总']
+    devices_data = overall['各设备']
+    
+    ctx = dash.callback_context
+    triggered = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
+    
+    if 'drilldown-btn' in triggered:
+        try:
+            import json as _json
+            btn_id_str = triggered.split('.')[0]
+            btn_id = _json.loads(btn_id_str)
+            action = btn_id.get('index', '')
+        except Exception:
+            action = ''
+    else:
+        action = ''
+    
+    if not current_state:
+        current_state = {}
+    
+    if action == 'reset' or action == '':
+        current_state = {}
+    
+    if action.startswith('factor:'):
+        factor_name = action.split(':')[1]
+        current_state = {'level': 'factor', 'factor': factor_name}
+    elif action.startswith('device:'):
+        parts = action.split(':')
+        factor_name = parts[1]
+        device_name = parts[2]
+        current_state = {'level': 'device', 'factor': factor_name, 'device': device_name}
+    elif action.startswith('event:'):
+        parts = action.split(':')
+        factor_name = parts[1]
+        device_name = parts[2]
+        date_val = parts[3]
+        current_state = {'level': 'event', 'factor': factor_name, 'device': device_name, 'date': date_val}
+    
+    level = current_state.get('level', 'top')
+    
+    breadcrumb_items = [html.Span("OEE总览", style={"fontWeight": "bold"})]
+    
+    if level == 'top':
+        oee_val = summary['OEE']
+        avail_val = summary['可用率']
+        perf_val = summary['性能率']
+        qual_val = summary['质量率']
+        
+        factor_gaps = {
+            '可用率': max(0, 0.90 - avail_val),
+            '性能率': max(0, 0.95 - perf_val),
+            '质量率': max(0, 0.999 - qual_val),
+        }
+        worst_factor = max(factor_gaps, key=factor_gaps.get)
+        
+        content = html.Div([
+            html.Div([
+                html.H5(f"整体OEE: {oee_val*100:.2f}%", className="mb-3"),
+                html.P("点击与目标差距最大的因子下钻定位问题根源：", className="text-muted mb-3"),
+            ]),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("可用率", className="mb-1"),
+                            html.H3(f"{avail_val*100:.1f}%", style={"color": "#2ecc71", "fontWeight": "bold"}),
+                            html.Small(f"目标 90% | 差距 {factor_gaps['可用率']*100:.1f}个百分点"),
+                        ], className="text-center"),
+                    ], className="shadow-sm",
+                       style={"cursor": "pointer", "border": "2px solid #2ecc71" if worst_factor == '可用率' else "1px solid #dee2e6"}),
+                    html.Div(dbc.Button("下钻 →", id={'type': 'drilldown-btn', 'index': 'factor:可用率'},
+                                       color="success", size="sm", className="mt-2 w-100"), className="text-center"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("性能率", className="mb-1"),
+                            html.H3(f"{perf_val*100:.1f}%", style={"color": "#f39c12", "fontWeight": "bold"}),
+                            html.Small(f"目标 95% | 差距 {factor_gaps['性能率']*100:.1f}百分点"),
+                        ], className="text-center"),
+                    ], className="shadow-sm",
+                       style={"cursor": "pointer", "border": "2px solid #f39c12" if worst_factor == '性能率' else "1px solid #dee2e6"}),
+                    html.Div(dbc.Button("下钻 →", id={'type': 'drilldown-btn', 'index': 'factor:性能率'},
+                                       color="warning", size="sm", className="mt-2 w-100"), className="text-center"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("质量率", className="mb-1"),
+                            html.H3(f"{qual_val*100:.1f}%", style={"color": "#3498db", "fontWeight": "bold"}),
+                            html.Small(f"目标 99.9% | 差距 {factor_gaps['质量率']*100:.1f}百分点"),
+                        ], className="text-center"),
+                    ], className="shadow-sm",
+                       style={"cursor": "pointer", "border": "2px solid #3498db" if worst_factor == '质量率' else "1px solid #dee2e6"}),
+                    html.Div(dbc.Button("下钻 →", id={'type': 'drilldown-btn', 'index': 'factor:质量率'},
+                                       color="info", size="sm", className="mt-2 w-100"), className="text-center"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("最大差距因子", className="mb-1"),
+                            html.H3(worst_factor, style={"color": "#e74c3c", "fontWeight": "bold"}),
+                            html.Small(f"差距 {factor_gaps[worst_factor]*100:.1f}百分点"),
+                        ], className="text-center"),
+                    ], className="shadow-sm", style={"border": "2px solid #e74c3c"}),
+                ], width=3),
+            ]),
+        ])
+        breadcrumb_items = [html.Span("OEE总览", style={"fontWeight": "bold"})]
+    
+    elif level == 'factor':
+        factor_name = current_state['factor']
+        factor_col = factor_name
+        target_map = {'可用率': 0.90, '性能率': 0.95, '质量率': 0.999}
+        target_val = target_map.get(factor_name, 0.85)
+        
+        device_ranking = []
+        for device_name, d in devices_data.items():
+            gap = target_val - d[factor_col]
+            device_ranking.append({
+                'device': device_name,
+                'value': d[factor_col],
+                'gap': gap,
+                'oee': d['OEE'],
+            })
+        device_ranking.sort(key=lambda x: x['gap'], reverse=True)
+        
+        rows = []
+        for i, dr in enumerate(device_ranking):
+            color = "danger" if dr['gap'] > 0.1 else "warning" if dr['gap'] > 0.05 else "success"
+            rows.append(html.Tr([
+                html.Td(str(i + 1), className="text-center"),
+                html.Td(html.Strong(dr['device'])),
+                html.Td(f"{dr['value']*100:.2f}%"),
+                html.Td(f"{dr['gap']*100:.1f}pp", style={"color": "#dc3545" if dr['gap'] > 0 else "#198754"}),
+                html.Td(f"{dr['oee']*100:.2f}%"),
+                html.Td(dbc.Button("下钻", id={'type': 'drilldown-btn', 'index': f'device:{factor_name}:{dr["device"]}'},
+                                   color=color, size="sm")),
+            ]))
+        
+        content = html.Div([
+            html.H5(f"因子: {factor_name}", className="mb-2"),
+            html.P(f"整体{factor_name}: {summary[factor_col]*100:.2f}% (目标 {target_val*100:.1f}%)", className="text-muted mb-3"),
+            html.P("各设备在该因子的表现排名（差距最大的排在前面）：", className="mb-2"),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#"), html.Th("设备"), html.Th(factor_name), html.Th("与目标差距"), html.Th("OEE"), html.Th("操作"),
+                ])),
+                html.Tbody(rows),
+            ], className="table table-sm"),
+        ])
+        breadcrumb_items = [
+            html.Span("OEE总览", style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(factor_name, style={"fontWeight": "bold"}),
+        ]
+    
+    elif level == 'device':
+        factor_name = current_state['factor']
+        device_name = current_state['device']
+        factor_col = factor_name
+        
+        device_df = df[df['设备编号'] == device_name].copy()
+        device_df = device_df[(device_df['日期'] >= start_date) & (device_df['日期'] <= end_date)]
+        
+        daily_results = []
+        for date_val in sorted(device_df['日期'].unique()):
+            day_result = calculate_oee_for_device(df, device_name, date_val, date_val, DEFAULT_TAKT.get(device_name))
+            daily_results.append({
+                'date': date_val,
+                'value': day_result[factor_col],
+                'oee': day_result['OEE'],
+                'avail': day_result['可用率'],
+                'perf': day_result['性能率'],
+                'qual': day_result['质量率'],
+            })
+        daily_results.sort(key=lambda x: x['value'])
+        
+        rows = []
+        for i, dr in enumerate(daily_results):
+            color = "danger" if dr['value'] < 0.7 else "warning" if dr['value'] < 0.85 else "success"
+            rows.append(html.Tr([
+                html.Td(str(i + 1), className="text-center"),
+                html.Td(dr['date']),
+                html.Td(f"{dr['value']*100:.2f}%"),
+                html.Td(f"{dr['oee']*100:.2f}%"),
+                html.Td(f"{dr['avail']*100:.1f}%"),
+                html.Td(f"{dr['perf']*100:.1f}%"),
+                html.Td(f"{dr['qual']*100:.1f}%"),
+                html.Td(dbc.Button("下钻", id={'type': 'drilldown-btn', 'index': f'event:{factor_name}:{device_name}:{dr["date"]}'},
+                                   color=color, size="sm")),
+            ]))
+        
+        content = html.Div([
+            html.H5(f"设备: {device_name} — {factor_name}逐日明细", className="mb-2"),
+            html.P("按该因子值从低到高排列，点击下钻查看当日具体停机事件：", className="text-muted mb-3"),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#"), html.Th("日期"), html.Th(factor_name), html.Th("OEE"),
+                    html.Th("可用率"), html.Th("性能率"), html.Th("质量率"), html.Th("操作"),
+                ])),
+                html.Tbody(rows),
+            ], className="table table-sm"),
+        ])
+        breadcrumb_items = [
+            html.Span("OEE总览", style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(factor_name, style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(device_name, style={"fontWeight": "bold"}),
+        ]
+    
+    elif level == 'event':
+        factor_name = current_state['factor']
+        device_name = current_state['device']
+        date_val = current_state['date']
+        factor_col = factor_name
+        
+        device_df = df[(df['设备编号'] == device_name) & (df['日期'] == date_val)].copy()
+        
+        day_result = calculate_oee_for_device(df, device_name, date_val, date_val, DEFAULT_TAKT.get(device_name))
+        
+        non_run = device_df[device_df['记录类型'] != '运行'].sort_values('开始时间戳')
+        
+        event_rows = []
+        for i, (_, row) in enumerate(non_run.iterrows()):
+            rtype = row['记录类型']
+            reason = row.get('停机原因分类', '')
+            duration = row['持续时间分钟']
+            start_t = row['开始时间戳'].strftime('%H:%M:%S')
+            end_t = row['结束时间戳'].strftime('%H:%M:%S')
+            
+            if rtype == '停机':
+                color = "danger"
+                label = f"停机: {reason}" if reason else "停机: 未分类"
+            elif rtype == '换模':
+                color = "warning"
+                label = "换模"
+            elif rtype == '空转':
+                color = "info"
+                label = "空转"
+            else:
+                color = "secondary"
+                label = rtype
+            
+            event_rows.append(html.Tr([
+                html.Td(str(i + 1), className="text-center"),
+                html.Td(label),
+                html.Td(f"{start_t} - {end_t}"),
+                html.Td(f"{duration:.1f} min"),
+                html.Td(dbc.Badge(rtype, color=color)),
+            ]))
+        
+        run_df = device_df[device_df['记录类型'] == '运行']
+        total_output = run_df['产量'].sum()
+        total_good = run_df['合格品数'].sum()
+        
+        content = html.Div([
+            html.H5(f"{device_name} — {date_val} 详细事件", className="mb-2"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.Small(f"{factor_name}"),
+                            html.H4(f"{day_result[factor_col]*100:.2f}%", style={"fontWeight": "bold", "color": "#e74c3c" if day_result[factor_col] < 0.8 else "#198754"}),
+                        ], className="text-center p-2"),
+                    ], className="shadow-sm"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.Small("OEE"),
+                            html.H4(f"{day_result['OEE']*100:.2f}%", style={"fontWeight": "bold"}),
+                        ], className="text-center p-2"),
+                    ], className="shadow-sm"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.Small("产量/合格品"),
+                            html.H4(f"{total_output:.0f}/{total_good:.0f}", style={"fontWeight": "bold"}),
+                        ], className="text-center p-2"),
+                    ], className="shadow-sm"),
+                ], width=3),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.Small("停机次数"),
+                            html.H4(f"{len(non_run)}次", style={"fontWeight": "bold", "color": "#e74c3c" if len(non_run) > 3 else "#198754"}),
+                        ], className="text-center p-2"),
+                    ], className="shadow-sm"),
+                ], width=3),
+            ], className="mb-3"),
+            html.P("当日非运行事件明细：", className="mb-2"),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#"), html.Th("类型/原因"), html.Th("时间段"), html.Th("持续时间"), html.Th("分类"),
+                ])),
+                html.Tbody(event_rows if event_rows else html.Tr(html.Td("无停机事件", colSpan=5, className="text-center text-muted"))),
+            ], className="table table-sm"),
+        ])
+        breadcrumb_items = [
+            html.Span("OEE总览", style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(factor_name, style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(device_name, style={"cursor": "pointer", "color": "#0d6efd"}),
+            html.Span(" > "),
+            html.Span(f"{date_val}", style={"fontWeight": "bold"}),
+        ]
+    
+    breadcrumb = html.Div([
+        dbc.Button("⟲ 重置", id={'type': 'drilldown-btn', 'index': 'reset'},
+                   color="secondary", size="sm", className="me-2"),
+        *breadcrumb_items,
+    ], className="mb-3")
+    
+    return html.Div([breadcrumb, content]), current_state
 
 
 @app.callback(
