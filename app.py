@@ -626,6 +626,21 @@ def get_maintenance_schedule_layout():
                         dbc.Button("📊 生成排程", id='generate-schedule-btn', color="primary", className="w-100"),
                     ], width=3),
                 ]),
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("历史排程对比", className="form-label mt-3"),
+                        dcc.Dropdown(
+                            id='history-snapshot-dropdown',
+                            placeholder="选择历史快照进行对比（虚线显示）",
+                            className="form-select",
+                            clearable=True,
+                        ),
+                    ], width=9),
+                    dbc.Col([
+                        html.Label("&nbsp;", className="form-label d-block mt-3"),
+                        dbc.Button("🗑️ 清除快照", id='clear-snapshots-btn', color="secondary", size="sm", className="mt-2"),
+                    ], width=3),
+                ]),
             ]),
         ], className="shadow-sm mb-4"),
         
@@ -693,6 +708,16 @@ def get_maintenance_schedule_layout():
             ]),
         ], className="shadow-sm mb-4"),
         
+        dbc.Card([
+            dbc.CardHeader([
+                html.H5("📈 维护完成率统计（最近30天）", className="mb-0"),
+                html.Small(" 实际完成预防维护任务 / 计划维护任务", className="text-muted ms-2"),
+            ]),
+            dbc.CardBody([
+                dcc.Graph(id='completion-rate-chart'),
+            ]),
+        ], className="shadow-sm mb-4"),
+        
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -700,17 +725,37 @@ def get_maintenance_schedule_layout():
                         html.Div([
                             html.H5("📋 维护排程列表", className="mb-0"),
                             html.Div([
-                                dbc.Button(
-                                    "📅 导出iCalendar(.ics)",
-                                    id='export-ics-btn',
-                                    color="success",
-                                    size="sm",
-                                ),
-                                dcc.Download(id='download-ics'),
+                                html.Div([
+                                    html.Label("导出紧迫度:", className="form-label me-2 mb-0"),
+                                    dcc.Dropdown(
+                                        id='export-urgency-filter',
+                                        options=[
+                                            {'label': '全部', 'value': 'all'},
+                                            {'label': '紧急', 'value': '紧急'},
+                                            {'label': '临近', 'value': '临近'},
+                                            {'label': '充裕', 'value': '充裕'},
+                                        ],
+                                        value='all',
+                                        clearable=False,
+                                        style={'width': '120px', 'display': 'inline-block', 'verticalAlign': 'middle'},
+                                        className="me-2",
+                                    ),
+                                    html.Span(id='export-preview-count', className="text-muted me-2"),
+                                    dbc.Button(
+                                        "📅 导出iCalendar(.ics)",
+                                        id='export-ics-btn',
+                                        color="success",
+                                        size="sm",
+                                    ),
+                                    dcc.Download(id='download-ics'),
+                                ], style={'display': 'flex', 'alignItems': 'center'}),
                             ]),
                         ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
                     ]),
-                    dbc.CardBody(id='schedule-list'),
+                    dbc.CardBody([
+                        html.Div(id='schedule-list'),
+                        html.Div(id='conflict-warning-panel', className="mt-4"),
+                    ]),
                 ], className="shadow-sm"),
             ], width=12),
         ], className="mb-4"),
@@ -722,6 +767,10 @@ def get_maintenance_schedule_layout():
             ]),
             dbc.CardBody(id='weibull-params-panel'),
         ], className="shadow-sm mb-4"),
+        
+        dcc.Store(id='schedule-snapshots-store', data=[]),
+        dcc.Store(id='selected-snapshot-store', data=None),
+        dcc.Store(id='conflicts-store', data=[]),
         
     ], fluid=True)
 
@@ -2189,7 +2238,7 @@ SCHEDULE_STORE = {
 }
 
 
-def create_maintenance_gantt_chart(schedule_result):
+def create_maintenance_gantt_chart(schedule_result, snapshot_schedule=None, current_params=None, snapshot_params=None):
     if not schedule_result or not schedule_result.get('排程结果'):
         fig = go.Figure()
         fig.update_layout(title="请先导入数据并生成排程")
@@ -2205,6 +2254,49 @@ def create_maintenance_gantt_chart(schedule_result):
     device_list = sorted([info['设备编号'] for info in device_infos])
 
     fig = go.Figure()
+    
+    if snapshot_schedule and snapshot_schedule.get('排程结果'):
+        snapshot_assignments = snapshot_schedule['排程结果']
+        for device_idx, device_id in enumerate(device_list):
+            device_snapshot = [a for a in snapshot_assignments if a['设备编号'] == device_id]
+            
+            for assignment in device_snapshot:
+                start = assignment['维护开始时间']
+                end = assignment['维护结束时间']
+                urgency = assignment['紧迫度']
+                base_color = get_urgency_color(urgency)
+                
+                import re
+                match = re.match(r'#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})', base_color)
+                if match:
+                    r, g, b = int(match.group(1), 16), int(match.group(2), 16), int(match.group(3), 16)
+                    rgba = f"rgba({r}, {g}, {b}, 0.4)"
+                else:
+                    rgba = "rgba(108, 117, 125, 0.4)"
+
+                hover_text = (
+                    f"【历史快照】<br>"
+                    f"设备: {device_id}<br>"
+                    f"紧迫度: {urgency}<br>"
+                    f"维护时段: {start.strftime('%Y-%m-%d %H:%M')} - {end.strftime('%H:%M')}<br>"
+                    f"班次: {assignment['班次']} ({assignment['时段类型']})<br>"
+                    f"健康分: {assignment['健康分']}分<br>"
+                )
+                if assignment.get('当前可靠度') is not None:
+                    hover_text += f"当前可靠度: {assignment['当前可靠度']*100:.1f}%<br>"
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=[start, end],
+                        y=[device_idx, device_idx],
+                        mode='lines',
+                        line=dict(color=rgba, width=25, dash='dash'),
+                        name=f"[历史] {device_id} - {urgency}",
+                        showlegend=False,
+                        hovertext=hover_text,
+                        hoverinfo='text',
+                    )
+                )
 
     for device_idx, device_id in enumerate(device_list):
         device_info = next((i for i in device_infos if i['设备编号'] == device_id), None)
@@ -2217,6 +2309,7 @@ def create_maintenance_gantt_chart(schedule_result):
             color = get_urgency_color(urgency)
 
             hover_text = (
+                f"【当前排程】<br>"
                 f"设备: {device_id}<br>"
                 f"紧迫度: {urgency}<br>"
                 f"维护时段: {start.strftime('%Y-%m-%d %H:%M')} - {end.strftime('%H:%M')}<br>"
@@ -2244,9 +2337,6 @@ def create_maintenance_gantt_chart(schedule_result):
                     hoverinfo='text',
                 )
             )
-
-            if assignment.get('建议维护时间'):
-                pass
 
     fig.add_shape(
         type="line",
@@ -2280,6 +2370,20 @@ def create_maintenance_gantt_chart(schedule_result):
         range=[current_time - timedelta(hours=2), horizon_end + timedelta(hours=2)],
     )
 
+    title = '预防性维护排程甘特图（未来7天）'
+    
+    if snapshot_schedule and current_params and snapshot_params:
+        param_diffs = []
+        if current_params.get('reliability_threshold') != snapshot_params.get('reliability_threshold'):
+            param_diffs.append(f"可靠度阈值: {snapshot_params.get('reliability_threshold')}% → {current_params.get('reliability_threshold')}%")
+        if current_params.get('health_threshold') != snapshot_params.get('health_threshold'):
+            param_diffs.append(f"健康分阈值: {snapshot_params.get('health_threshold')} → {current_params.get('health_threshold')}")
+        if current_params.get('horizon_days') != snapshot_params.get('horizon_days'):
+            param_diffs.append(f"排程范围: {snapshot_params.get('horizon_days')}天 → {current_params.get('horizon_days')}天")
+        
+        if param_diffs:
+            title += f"<br><sup>参数差异: {'; '.join(param_diffs)}</sup>"
+
     legend_items = [
         ('紧急', '#dc3545'),
         ('临近', '#fd7e14'),
@@ -2299,9 +2403,21 @@ def create_maintenance_gantt_chart(schedule_result):
                 showlegend=True,
             )
         )
+    
+    if snapshot_schedule:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode='lines',
+                line=dict(color='rgba(108, 117, 125, 0.5)', width=10, dash='dash'),
+                name="历史快照（对比）",
+                showlegend=True,
+            )
+        )
 
     fig.update_layout(
-        title='预防性维护排程甘特图（未来7天）',
+        title=title,
         height=max(400, len(device_list) * 60),
         hovermode='closest',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -2644,11 +2760,340 @@ def create_weibull_params_panel(schedule_result):
     return dbc.Row(all_cards)
 
 
-def generate_ics_file(schedule_result):
+MAX_SNAPSHOTS = 10
+
+def serialize_datetime(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, date):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: serialize_datetime(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_datetime(v) for v in obj]
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+def deserialize_datetime(obj):
+    if isinstance(obj, str):
+        try:
+            return datetime.fromisoformat(obj)
+        except ValueError:
+            try:
+                return date.fromisoformat(obj)
+            except ValueError:
+                return obj
+    elif isinstance(obj, dict):
+        return {k: deserialize_datetime(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [deserialize_datetime(v) for v in obj]
+    return obj
+
+def save_snapshot(snapshots, schedule_result, reliability_threshold, health_threshold, horizon_days):
+    snapshot = {
+        'id': datetime.now().strftime('%Y%m%d%H%M%S%f'),
+        'timestamp': datetime.now(),
+        'reliability_threshold': reliability_threshold,
+        'health_threshold': health_threshold,
+        'horizon_days': horizon_days,
+        'schedule_result': serialize_datetime(schedule_result),
+    }
+    
+    snapshots.insert(0, snapshot)
+    
+    if len(snapshots) > MAX_SNAPSHOTS:
+        snapshots = snapshots[:MAX_SNAPSHOTS]
+    
+    return snapshots
+
+def get_snapshot_options(snapshots):
+    if not snapshots:
+        return []
+    
+    options = []
+    for idx, s in enumerate(snapshots):
+        ts = deserialize_datetime(s['timestamp']) if isinstance(s['timestamp'], str) else s['timestamp']
+        label = f"{idx + 1}. {ts.strftime('%Y-%m-%d %H:%M:%S')} | 可靠度:{s['reliability_threshold']}% | 健康分:{s['health_threshold']} | 范围:{s['horizon_days']}天"
+        options.append({'label': label, 'value': s['id']})
+    return options
+
+def get_snapshot_by_id(snapshots, snapshot_id):
+    for s in snapshots:
+        if s['id'] == snapshot_id:
+            return deserialize_datetime(s)
+    return None
+
+def detect_schedule_conflicts(schedule_result, df, snapshots):
+    if not schedule_result or not schedule_result.get('排程结果') or df is None:
+        return []
+    
+    conflicts = []
+    assignments = schedule_result['排程结果']
+    current_time = schedule_result.get('当前时间', datetime.now())
+    total_devices = schedule_result.get('统计信息', {}).get('总设备数', len(df['设备编号'].unique()))
+    
+    for a in assignments:
+        device_id = a['设备编号']
+        start_time = a['维护开始时间']
+        end_time = a['维护结束时间']
+        
+        hours_since_last = None
+        last_maintenance_from_history = None
+        for s in snapshots[1:]:
+            s_deser = deserialize_datetime(s)
+            sched = s_deser.get('schedule_result', {}).get('排程结果', [])
+            for hist_a in sched:
+                if hist_a['设备编号'] == device_id:
+                    hist_end = hist_a['维护结束时间']
+                    gap_hours = (start_time - hist_end).total_seconds() / 3600.0
+                    if gap_hours < 72 and gap_hours >= 0:
+                        hours_since_last = gap_hours
+                        last_maintenance_from_history = hist_end
+                        break
+            if hours_since_last is not None:
+                break
+        
+        if hours_since_last is not None and hours_since_last < 72:
+            conflicts.append({
+                'type': '72小时内重复维护',
+                'device': device_id,
+                'time_range': f"{start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')}",
+                'details': f"距离上次排程维护仅 {hours_since_last:.1f} 小时（上次: {last_maintenance_from_history.strftime('%Y-%m-%d %H:%M')}）",
+                'suggestion': '建议重新安排维护时间，确保维护间隔至少72小时，或评估是否确有必要进行连续维护'
+            })
+    
+    planned_downtime = df[
+        (df['记录类型'] == '停机') & 
+        (df['停机原因分类'] == '计划停机')
+    ].copy()
+    
+    for a in assignments:
+        device_id = a['设备编号']
+        start_time = a['维护开始时间']
+        end_time = a['维护结束时间']
+        
+        device_planned = planned_downtime[planned_downtime['设备编号'] == device_id]
+        for _, pd_row in device_planned.iterrows():
+            pd_start = pd_row['开始时间戳']
+            pd_end = pd_row['结束时间戳']
+            
+            if (start_time < pd_end) and (end_time > pd_start):
+                overlap_start = max(start_time, pd_start)
+                overlap_end = min(end_time, pd_end)
+                overlap_minutes = (overlap_end - overlap_start).total_seconds() / 60.0
+                
+                conflicts.append({
+                    'type': '与计划停产时间重叠',
+                    'device': device_id,
+                    'time_range': f"{start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')}",
+                    'details': f"与计划停产时段 {pd_start.strftime('%Y-%m-%d %H:%M')} - {pd_end.strftime('%H:%M')} 重叠 {overlap_minutes:.0f} 分钟",
+                    'suggestion': '建议调整维护时段避开计划停产时间，或利用停产时段进行维护'
+                })
+    
+    day_assignments = {}
+    for a in assignments:
+        day_key = a['维护开始时间'].strftime('%Y-%m-%d')
+        if day_key not in day_assignments:
+            day_assignments[day_key] = []
+        day_assignments[day_key].append(a)
+    
+    max_daily = max(1, int(total_devices * 0.4))
+    for day_key, day_list in day_assignments.items():
+        if len(day_list) > max_daily:
+            devices_in_day = [a['设备编号'] for a in day_list]
+            conflicts.append({
+                'type': '单日维护集中度过高',
+                'device': ', '.join(devices_in_day),
+                'time_range': day_key,
+                'details': f"当日安排 {len(day_list)} 台设备维护，超过总设备数40%阈值（最多 {max_daily} 台）",
+                'suggestion': '建议将部分设备维护分散到其他日期，避免单日维护压力过大影响生产'
+            })
+    
+    return conflicts
+
+def create_conflict_warning_panel(conflicts):
+    if not conflicts:
+        return html.Div("")
+    
+    conflict_rows = []
+    for idx, c in enumerate(conflicts, 1):
+        type_badge_color = {
+            '72小时内重复维护': 'danger',
+            '与计划停产时间重叠': 'warning',
+            '单日维护集中度过高': 'info',
+        }.get(c['type'], 'secondary')
+        
+        conflict_rows.append(html.Tr([
+            html.Td(str(idx), className="text-center"),
+            html.Td(dbc.Badge(c['type'], color=type_badge_color)),
+            html.Td(html.Strong(c['device'])),
+            html.Td(c['time_range']),
+            html.Td(c['details']),
+            html.Td([
+                html.Span("💡 "),
+                html.Span(c['suggestion'])
+            ]),
+        ]))
+    
+    return dbc.Alert([
+        html.H6(f"⚠️ 检测到 {len(conflicts)} 个排程冲突：", className="alert-heading"),
+        html.Table([
+            html.Thead(html.Tr([
+                html.Th("#", className="text-center", style={'width': '5%'}),
+                html.Th("冲突类型", style={'width': '15%'}),
+                html.Th("涉及设备", style={'width': '15%'}),
+                html.Th("时间段", style={'width': '15%'}),
+                html.Th("详情", style={'width': '25%'}),
+                html.Th("建议处理", style={'width': '25%'}),
+            ])),
+            html.Tbody(conflict_rows),
+        ], className="table table-sm table-warning"),
+        html.Hr(className="my-2"),
+        html.Small("以上冲突不影响排程生成，但建议人工核实并调整以优化排程质量", className="text-muted"),
+    ], color="warning", className="mt-3")
+
+def calculate_maintenance_completion_rate(df, days=30):
+    if df is None or len(df) == 0:
+        return []
+    
+    end_date = pd.to_datetime(df['日期'].max()).date()
+    start_date = end_date - timedelta(days=days - 1)
+    
+    planned_maintenance = df[
+        (df['记录类型'] == '停机') & 
+        (df['停机原因分类'] == '计划维护')
+    ].copy()
+    
+    actual_maintenance = df[
+        (df['记录类型'] == '停机') & 
+        (df['停机原因分类'] == '预防维护')
+    ].copy()
+    
+    if len(planned_maintenance) == 0:
+        return []
+    
+    planned_maintenance['日期'] = pd.to_datetime(planned_maintenance['日期']).dt.date
+    actual_maintenance['日期'] = pd.to_datetime(actual_maintenance['日期']).dt.date
+    
+    daily_stats = []
+    for i in range(days):
+        current_date = start_date + timedelta(days=i)
+        
+        day_planned = planned_maintenance[planned_maintenance['日期'] == current_date]
+        day_actual = actual_maintenance[actual_maintenance['日期'] == current_date]
+        
+        planned_devices = set(day_planned['设备编号'].unique())
+        actual_devices = set(day_actual['设备编号'].unique())
+        
+        if len(planned_devices) == 0:
+            continue
+        
+        completed = planned_devices & actual_devices
+        incomplete = planned_devices - actual_devices
+        
+        completion_rate = len(completed) / len(planned_devices)
+        
+        daily_stats.append({
+            'date': current_date,
+            'planned_count': len(planned_devices),
+            'actual_count': len(completed),
+            'completion_rate': completion_rate,
+            'incomplete_devices': sorted(list(incomplete)),
+            'completed_devices': sorted(list(completed)),
+        })
+    
+    return daily_stats
+
+def create_completion_rate_chart(daily_stats):
+    if not daily_stats:
+        fig = go.Figure()
+        fig.update_layout(title="暂无维护完成率数据")
+        return fig
+    
+    dates = [s['date'] for s in daily_stats]
+    rates = [s['completion_rate'] * 100 for s in daily_stats]
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=rates,
+        mode='lines+markers',
+        name='维护完成率',
+        line=dict(color='#198754', width=2),
+        marker=dict(size=8),
+        hovertemplate=(
+            '日期: %{x}<br>' +
+            '完成率: %{y:.1f}%<br>' +
+            '<extra>%{customdata}</extra>'
+        ),
+        customdata=[
+            f"计划: {s['planned_count']}台 | 完成: {s['actual_count']}台<br>未完成: {', '.join(s['incomplete_devices']) if s['incomplete_devices'] else '无'}"
+            for s in daily_stats
+        ],
+        connectgaps=False,
+    ))
+    
+    fig.add_hline(
+        y=80,
+        line_dash="dash",
+        line_color="#dc3545",
+        annotation_text="目标 80%",
+        annotation_position="top right",
+        opacity=0.7,
+    )
+    
+    fig.update_layout(
+        title='维护完成率趋势（最近30天，无计划任务日期不显示）',
+        xaxis_title='日期',
+        yaxis_title='完成率 (%)',
+        yaxis=dict(range=[0, 105]),
+        hovermode='x unified',
+        height=350,
+        showlegend=False,
+    )
+    
+    return fig
+
+def get_device_last_failure_info(df, device_id):
+    if df is None or len(df) == 0:
+        return None
+    
+    device_failures = df[
+        (df['设备编号'] == device_id) &
+        (df['记录类型'] == '停机') &
+        (df['停机原因分类'] == '设备故障')
+    ].copy()
+    
+    if len(device_failures) == 0:
+        return None
+    
+    last_failure = device_failures.sort_values('结束时间戳').iloc[-1]
+    duration_minutes = last_failure['持续时间分钟']
+    
+    return {
+        'failure_time': last_failure['结束时间戳'],
+        'duration_minutes': duration_minutes,
+        'reason': last_failure.get('停机原因', '未知原因'),
+    }
+
+def generate_ics_file(schedule_result, urgency_filter='all', df=None):
     if not schedule_result or not schedule_result.get('排程结果'):
         return None
 
     assignments = schedule_result['排程结果']
+    
+    if urgency_filter != 'all':
+        assignments = [a for a in assignments if a['紧迫度'] == urgency_filter]
+    
+    if not assignments:
+        return None
+
     current_time = schedule_result.get('当前时间', datetime.now())
 
     urgency_map = {
@@ -2680,7 +3125,8 @@ def generate_ics_file(schedule_result):
         dtstart = start.strftime('%Y%m%dT%H%M%S')
         dtend = end.strftime('%Y%m%dT%H%M%S')
 
-        summary = f"【{urgency}】预防性维护 - {device_id}"
+        filter_label = f"[{urgency_filter}]" if urgency_filter != 'all' else ""
+        summary = f"{filter_label}【{urgency}】预防性维护 - {device_id}"
 
         description_parts = [
             f"设备编号: {device_id}",
@@ -2699,6 +3145,17 @@ def generate_ics_file(schedule_result):
         description_parts.append(f"分配方式: {a['分配备注']}")
         if a.get('强制优先'):
             description_parts.append("⚠️ 健康分低于阈值，强制优先维护")
+        
+        last_failure = get_device_last_failure_info(df, device_id)
+        if last_failure:
+            ft = last_failure['failure_time']
+            dur = last_failure['duration_minutes']
+            reason = last_failure['reason']
+            description_parts.append("")
+            description_parts.append(f"📋 最近一次故障记录:")
+            description_parts.append(f"  故障时间: {ft.strftime('%Y-%m-%d %H:%M')}")
+            description_parts.append(f"  停机时长: {dur:.0f}分钟")
+            description_parts.append(f"  故障原因: {reason}")
 
         description = "\\n".join(description_parts)
 
@@ -2742,14 +3199,33 @@ def generate_ics_file(schedule_result):
     [Output('schedule-kpi-cards', 'children'),
      Output('maintenance-gantt-chart', 'figure'),
      Output('schedule-list', 'children'),
-     Output('weibull-params-panel', 'children')],
+     Output('weibull-params-panel', 'children'),
+     Output('schedule-snapshots-store', 'data'),
+     Output('history-snapshot-dropdown', 'options'),
+     Output('conflicts-store', 'data'),
+     Output('conflict-warning-panel', 'children'),
+     Output('completion-rate-chart', 'figure'),
+     Output('export-preview-count', 'children')],
     [Input('generate-schedule-btn', 'n_clicks'),
      Input('schedule-horizon', 'value'),
      Input('reliability-threshold', 'value'),
-     Input('health-threshold', 'value')]
+     Input('health-threshold', 'value'),
+     Input('history-snapshot-dropdown', 'value'),
+     Input('export-urgency-filter', 'value')],
+    [State('schedule-snapshots-store', 'data'),
+     State('schedule-horizon', 'value'),
+     State('reliability-threshold', 'value'),
+     State('health-threshold', 'value')]
 )
-def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thresh):
-    if DATA_STORE['processed_df'] is None:
+def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thresh, 
+                                   selected_snapshot_id, export_filter,
+                                   existing_snapshots, horizon_state, rel_state, health_state):
+    ctx = dash.callback_context
+    triggered = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
+    
+    df = DATA_STORE['processed_df']
+    
+    if df is None:
         empty_fig = go.Figure()
         empty_fig.update_layout(title="请先导入数据")
         no_data = html.Div("请先导入数据", className="text-muted text-center p-5")
@@ -2759,9 +3235,25 @@ def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thres
             dbc.Col(get_kpi_card("紧急设备", "--", "请先导入数据", "danger", "⚠️"), width=3),
             dbc.Col(get_kpi_card("数据充足", "--", "请先导入数据", "info", "📊"), width=3),
         ]
-        return kpi_cards, empty_fig, no_data, no_data
+        return kpi_cards, empty_fig, no_data, no_data, [], [], [], [], empty_fig, ""
 
-    if not n_clicks:
+    completion_stats = calculate_maintenance_completion_rate(df, 30)
+    completion_fig = create_completion_rate_chart(completion_stats)
+    
+    if 'export-urgency-filter' in triggered:
+        schedule = SCHEDULE_STORE.get('schedule')
+        if schedule and schedule.get('排程结果'):
+            assignments = schedule['排程结果']
+            if export_filter != 'all':
+                filtered = [a for a in assignments if a['紧迫度'] == export_filter]
+                preview_text = f"将导出 {len(filtered)} 个事件"
+            else:
+                preview_text = f"将导出 {len(assignments)} 个事件"
+        else:
+            preview_text = ""
+        raise dash.exceptions.PreventUpdate
+    
+    if not n_clicks and 'history-snapshot-dropdown' not in triggered:
         empty_fig = go.Figure()
         empty_fig.update_layout(title="点击上方'生成排程'按钮开始")
         hint = html.Div([
@@ -2776,37 +3268,68 @@ def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thres
             dbc.Col(get_kpi_card("紧急设备", "--", "生成排程后显示", "danger", "⚠️"), width=3),
             dbc.Col(get_kpi_card("数据充足", "--", "生成排程后显示", "info", "📊"), width=3),
         ]
-        return kpi_cards, empty_fig, hint, hint
+        snapshot_options = get_snapshot_options(existing_snapshots or [])
+        return kpi_cards, empty_fig, hint, hint, existing_snapshots or [], snapshot_options, [], [], completion_fig, ""
+    
+    horizon_days = max(3, min(30, int(horizon_state) if horizon_state else 7))
+    current_rel = int(rel_state) if rel_state else 70
+    current_health = int(health_state) if health_state else 50
+    
+    schedule_result = None
+    snapshots = existing_snapshots or []
+    
+    if 'generate-schedule-btn' in triggered and n_clicks:
+        from src.predictive_maintenance import (
+            DEFAULT_MAINTENANCE_INTERVAL_HOURS,
+            RELIABILITY_THRESHOLD as _DEFAULT_THRESH
+        )
+        import src.predictive_maintenance as pm_module
+        if rel_state:
+            pm_module.RELIABILITY_THRESHOLD = float(rel_state) / 100.0
+        if health_state:
+            original_calc_device = pm_module.calculate_device_maintenance_info
 
-    df = DATA_STORE['processed_df']
+            def patched_calc_device_maintenance_info(df, device_id, health_score):
+                result = original_calc_device(df, device_id, health_score)
+                result['强制优先'] = health_score < int(health_state)
+                if health_score < int(health_state) and result.get('紧迫度') and result['紧迫度'] != '数据不足':
+                    from src.predictive_maintenance import get_urgency_level as _gul
+                    result['紧迫度'] = '紧急'
+                return result
 
-    horizon_days = max(3, min(30, int(horizon) if horizon else 7))
+            pm_module.calculate_device_maintenance_info = patched_calc_device_maintenance_info
 
-    from src.predictive_maintenance import (
-        DEFAULT_MAINTENANCE_INTERVAL_HOURS,
-        RELIABILITY_THRESHOLD as _DEFAULT_THRESH
-    )
-    import src.predictive_maintenance as pm_module
-    if rel_threshold:
-        pm_module.RELIABILITY_THRESHOLD = float(rel_threshold) / 100.0
-    if health_thresh:
-        original_calc_device = pm_module.calculate_device_maintenance_info
+        max_date_str = str(df['日期'].max())
+        health_scores = calculate_all_health_scores(df, max_date_str, DEFAULT_TAKT, 7)
 
-        def patched_calc_device_maintenance_info(df, device_id, health_score):
-            result = original_calc_device(df, device_id, health_score)
-            result['强制优先'] = health_score < int(health_thresh)
-            if health_score < int(health_thresh) and result.get('紧迫度') and result['紧迫度'] != '数据不足':
-                from src.predictive_maintenance import get_urgency_level as _gul
-                result['紧迫度'] = '紧急'
-            return result
-
-        pm_module.calculate_device_maintenance_info = patched_calc_device_maintenance_info
-
-    max_date_str = str(df['日期'].max())
-    health_scores = calculate_all_health_scores(df, max_date_str, DEFAULT_TAKT, 7)
-
-    schedule_result = generate_full_maintenance_schedule(df, health_scores, horizon_days)
-    SCHEDULE_STORE['schedule'] = schedule_result
+        schedule_result = generate_full_maintenance_schedule(df, health_scores, horizon_days)
+        SCHEDULE_STORE['schedule'] = schedule_result
+        
+        snapshots = save_snapshot(snapshots, schedule_result, current_rel, current_health, horizon_days)
+    
+    if 'history-snapshot-dropdown' in triggered:
+        schedule_result = SCHEDULE_STORE.get('schedule')
+    
+    if not schedule_result:
+        schedule_result = SCHEDULE_STORE.get('schedule')
+    
+    if not schedule_result:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title="点击上方'生成排程'按钮开始")
+        hint = html.Div([
+            dbc.Alert([
+                html.H5("👆 请设置参数后点击'生成排程'按钮", className="alert-heading"),
+                html.P("系统将基于威布尔分布预测设备故障时间，并自动优化维护排程。", className="mb-0"),
+            ], color="info", className="text-center"),
+        ], className="p-5")
+        kpi_cards = [
+            dbc.Col(get_kpi_card("总设备数", "--", "生成排程后显示", "primary", "🔧"), width=3),
+            dbc.Col(get_kpi_card("已分配", "--", "生成排程后显示", "success", "✅"), width=3),
+            dbc.Col(get_kpi_card("紧急设备", "--", "生成排程后显示", "danger", "⚠️"), width=3),
+            dbc.Col(get_kpi_card("数据充足", "--", "生成排程后显示", "info", "📊"), width=3),
+        ]
+        snapshot_options = get_snapshot_options(snapshots)
+        return kpi_cards, empty_fig, hint, hint, snapshots, snapshot_options, [], [], completion_fig, ""
 
     stats = schedule_result.get('统计信息', {})
 
@@ -2840,28 +3363,73 @@ def generate_maintenance_schedule(n_clicks, horizon, rel_threshold, health_thres
             "📊"
         ), width=3),
     ]
+    
+    current_params = {
+        'reliability_threshold': current_rel,
+        'health_threshold': current_health,
+        'horizon_days': horizon_days,
+    }
+    
+    snapshot_schedule = None
+    snapshot_params = None
+    if selected_snapshot_id:
+        selected_snapshot = get_snapshot_by_id(snapshots, selected_snapshot_id)
+        if selected_snapshot:
+            snapshot_schedule = selected_snapshot.get('schedule_result')
+            snapshot_params = {
+                'reliability_threshold': selected_snapshot.get('reliability_threshold'),
+                'health_threshold': selected_snapshot.get('health_threshold'),
+                'horizon_days': selected_snapshot.get('horizon_days'),
+            }
 
-    gantt_fig = create_maintenance_gantt_chart(schedule_result)
+    gantt_fig = create_maintenance_gantt_chart(schedule_result, snapshot_schedule, current_params, snapshot_params)
     schedule_list = create_schedule_list_table(schedule_result)
     weibull_panel = create_weibull_params_panel(schedule_result)
+    
+    snapshot_options = get_snapshot_options(snapshots)
+    
+    conflicts = detect_schedule_conflicts(schedule_result, df, snapshots)
+    conflict_panel = create_conflict_warning_panel(conflicts)
+    
+    assignments = schedule_result.get('排程结果', [])
+    if export_filter != 'all':
+        filtered = [a for a in assignments if a['紧迫度'] == export_filter]
+        preview_text = f"将导出 {len(filtered)} 个事件"
+    else:
+        preview_text = f"将导出 {len(assignments)} 个事件"
 
-    return kpi_cards, gantt_fig, schedule_list, weibull_panel
+    return kpi_cards, gantt_fig, schedule_list, weibull_panel, snapshots, snapshot_options, conflicts, conflict_panel, completion_fig, preview_text
+
+
+@app.callback(
+    Output('schedule-snapshots-store', 'data', allow_duplicate=True),
+    [Input('clear-snapshots-btn', 'n_clicks')],
+    prevent_initial_call=True
+)
+def clear_snapshots(n_clicks):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    return []
 
 
 @app.callback(
     Output('download-ics', 'data'),
-    [Input('export-ics-btn', 'n_clicks')]
+    [Input('export-ics-btn', 'n_clicks')],
+    [State('export-urgency-filter', 'value')]
 )
-def export_ics_file(n_clicks):
+def export_ics_file(n_clicks, urgency_filter):
     if not n_clicks or not SCHEDULE_STORE.get('schedule'):
         raise dash.exceptions.PreventUpdate
+    
+    df = DATA_STORE.get('processed_df')
 
-    ics_content = generate_ics_file(SCHEDULE_STORE['schedule'])
+    ics_content = generate_ics_file(SCHEDULE_STORE['schedule'], urgency_filter=urgency_filter, df=df)
     if not ics_content:
         raise dash.exceptions.PreventUpdate
 
     current_time = SCHEDULE_STORE['schedule'].get('当前时间', datetime.now())
-    filename = f"维保排程_{current_time.strftime('%Y%m%d')}.ics"
+    filter_suffix = f"_{urgency_filter}" if urgency_filter != 'all' else ""
+    filename = f"维保排程{filter_suffix}_{current_time.strftime('%Y%m%d')}.ics"
 
     return dcc.send_string(ics_content, filename=filename)
 
